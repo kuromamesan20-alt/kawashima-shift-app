@@ -54,7 +54,15 @@ def main() -> None:
 
     # スタッフ情報は保存先(スプレッドシート)から読む。
     # 個人情報なのでGitHubには置かないため、手元のファイルは予備。
-    profiles = storage.load_profiles() or _load_profiles()
+    profiles = None
+    try:
+        profiles = storage.load_profiles()
+    except Exception as error:
+        st.error("スタッフ情報の読み込みに失敗しました。")
+        st.exception(error)
+        return
+    if not profiles:
+        profiles = _load_profiles()
     if not profiles:
         st.error("スタッフ情報がまだ登録されていません。")
         st.markdown(

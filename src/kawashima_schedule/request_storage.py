@@ -128,6 +128,7 @@ class GoogleSheetStorage(RequestStorage):
         try:
             sheet = book.worksheet(name)
         except Exception:
+            # シートが無い場合。作る指定でなければ「未設定」として None
             if not create:
                 return None
             sheet = book.add_worksheet(name, rows=2000, cols=len(header))
@@ -211,18 +212,28 @@ class GoogleSheetStorage(RequestStorage):
         """
         import yaml
 
-        try:
-            sheet = self._sheet(PROFILES_WORKSHEET, PROFILE_HEADER, create=False)
-        except Exception:
-            return None
+        from .profile_store import _from_dict
+
+        sheet = self._sheet(PROFILES_WORKSHEET, PROFILE_HEADER, create=False)
         if sheet is None:
             return None
 
-        from .profile_store import _from_dict
+        # 見出し行を自前で読む。get_all_records は見出しの重複などで
+        # 例外を投げることがあり、原因が分かりにくいため使わない。
+        rows = sheet.get_all_values()
+        if len(rows) < 2:
+            return None
+        header = [str(c).strip() for c in rows[0]]
+        try:
+            body_index = header.index(PROFILE_HEADER[2])
+        except ValueError:
+            return None
 
         profiles = []
-        for row in sheet.get_all_records():
-            body = str(row.get("勤務条件(YAML)", "")).strip()
+        for row in rows[1:]:
+            if body_index >= len(row):
+                continue
+            body = str(row[body_index]).strip()
             if not body:
                 continue
             try:
