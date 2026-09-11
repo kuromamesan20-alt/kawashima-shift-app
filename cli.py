@@ -43,6 +43,34 @@ from kawashima_schedule.scheduler import build_schedule  # noqa: E402
 from kawashima_schedule.request_storage import GoogleSheetStorage  # noqa: E402
 
 
+def _read_secrets(path: Path):
+    """Streamlitに貼ったのと同じTOMLを読む。読めなければ理由を返す。"""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9/3.10
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            return None, (
+                "TOMLを読む部品がありません。次を実行してください:\n"
+                "  ./venv/bin/pip install tomli"
+            )
+    if not path.exists():
+        return None, f"ファイルが見つかりません: {path}"
+    with path.open("rb") as handle:
+        secrets = tomllib.load(handle)
+    if not secrets.get("requests_sheet_id") or not secrets.get("gcp_service_account"):
+        return None, "secrets に requests_sheet_id と gcp_service_account が要ります"
+    return secrets, None
+
+
+def _cloud_storage(secrets):
+    return GoogleSheetStorage(
+        sheet_id=str(secrets["requests_sheet_id"]),
+        credentials=dict(secrets["gcp_service_account"]),
+    )
+
+
 def cmd_extract_profiles(args: argparse.Namespace) -> int:
     csv_path = Path(args.input)
     if not csv_path.exists():
@@ -298,19 +326,50 @@ def cmd_import_requests(args: argparse.Namespace) -> int:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    profiles_path = Path(args.profiles)
-    requests_path = Path(args.requests) if args.requests else None
-    if not profiles_path.exists():
-        print(f"エラー: YAMLが見つかりません: {profiles_path}", file=sys.stderr)
-        return 1
+    """月次勤務表を組む。
 
-    profiles = load_profiles(profiles_path)
+    --secrets を渡すと、Webアプリと同じスプレッドシートから
+    スタッフ情報と希望を読む。渡さなければ手元のファイルを使う。
+    """
+    profiles = None
     requests = []
-    if requests_path:
-        if not requests_path.exists():
-            print(f"エラー: 希望が見つかりません: {requests_path}", file=sys.stderr)
+
+    if args.secrets:
+        secrets, error = _read_secrets(Path(args.secrets))
+        if error:
+            print(f"エラー: {error}", file=sys.stderr)
             return 1
-        requests = load_requests(requests_path)
+        storage = _cloud_storage(secrets)
+        print("スプレッドシートから読み込んでいます...")
+        profiles = storage.load_profiles()
+        if not profiles:
+            print(
+                "エラー: スプレッドシートにスタッフ情報がありません。\n"
+                "  先に upload-profiles で書き出してください。",
+                file=sys.stderr,
+            )
+            return 1
+        requests = storage.load(args.year, args.month)
+        filled = [r for r in requests if r.entries]
+        print(f"  スタッフ {len(profiles)} 名 / 希望の記入 {len(filled)} 名分")
+        if not filled:
+            print("  ※ その月の希望はまだ1件も入っていません。")
+
+    if profiles is None:
+        profiles_path = Path(args.profiles) if args.profiles else None
+        if not profiles_path or not profiles_path.exists():
+            print(
+                "エラー: --profiles か --secrets のどちらかを指定してください",
+                file=sys.stderr,
+            )
+            return 1
+        profiles = load_profiles(profiles_path)
+        if args.requests:
+            requests_path = Path(args.requests)
+            if not requests_path.exists():
+                print(f"エラー: 希望が見つかりません: {requests_path}", file=sys.stderr)
+                return 1
+            requests = load_requests(requests_path)
 
     result = build_schedule(profiles, requests, args.year, args.month, args.time_limit)
     print(f"{args.year}年{args.month}月: {result.status}")
@@ -451,8 +510,12 @@ def main() -> int:
     requests_in.set_defaults(func=cmd_import_requests)
 
     generate = subparsers.add_parser("generate", help="月次勤務表を組んでExcelに出す")
-    generate.add_argument("--profiles", required=True, help="構造化YAMLのパス")
+    generate.add_argument("--profiles", help="構造化YAMLのパス(--secrets を使う場合は不要)")
     generate.add_argument("--requests", help="その月の希望(YAML)。無くても組める")
+    generate.add_argument(
+        "--secrets",
+        help="Webアプリと同じスプレッドシートから読む場合のTOMLファイル",
+    )
     generate.add_argument("--year", type=int, required=True)
     generate.add_argument("--month", type=int, required=True)
     generate.add_argument("--out", required=True, help="出力するExcelのパス")

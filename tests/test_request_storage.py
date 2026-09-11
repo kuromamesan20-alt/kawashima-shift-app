@@ -174,3 +174,36 @@ def test_save_resizes_before_writing_when_it_would_not_fit():
 
     assert fake.row_count >= 1 + 34 * 31
     assert len(fake.get_all_records()) == 34 * 31
+
+
+# --- スタッフ情報の保存 -----------------------------------------------------------
+
+
+def test_local_profiles_round_trip(tmp_path):
+    """スタッフ情報が保存先を通して往復すること。"""
+    from kawashima_schedule.models import StaffProfile
+
+    storage = LocalStorage(tmp_path)
+    assert storage.load_profiles() is None, "まだ何も無ければ None"
+
+    original = [
+        StaffProfile(
+            staff_id="id-1",
+            name="師長",
+            is_head_nurse=True,
+            available_day_shifts=["日③", "日"],
+            last_resort_day_shifts=["日③"],
+            can_night=False,
+        ),
+        StaffProfile(staff_id="id-2", name="職員A", unit="ばら", leave_from="2026-09"),
+    ]
+    storage.save_profiles(original)
+
+    loaded = {p.staff_id: p for p in storage.load_profiles()}
+    assert loaded["id-1"].is_head_nurse is True
+    assert loaded["id-1"].available_day_shifts == ["日③", "日"]
+    assert loaded["id-1"].last_resort_day_shifts == ["日③"]
+    assert loaded["id-1"].can_night is False
+    assert loaded["id-2"].unit == "ばら"
+    assert loaded["id-2"].leave_from == "2026-09"
+    assert loaded["id-2"].is_on_leave(2026, 10) is True

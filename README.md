@@ -145,7 +145,28 @@ Googleスプレッドシートにアップロードして共有し、黄色い�
 実物と同じ体裁で出力する。ユニット区切り、1人2行(2行目は中抜けと責任者「せ」)、
 右端の集計、最下部の日別チェック。組めない場合は理由を表示する。
 
-### 8. 希望入力のWebアプリ
+### 8. Webアプリの希望から勤務表を作る（毎月の運用）
+
+施設の担当者がWebアプリに入力した希望を、そのまま使って組む。
+
+```bash
+./venv/bin/python cli.py generate \
+  --secrets .streamlit/secrets.toml \
+  --year 2026 --month 10 \
+  --out "data/output/勤務計画表_2026年10月_2病棟全体.xlsx"
+```
+
+スタッフ情報も希望も、どちらもスプレッドシートから読む。手元のファイルは要らない。
+
+スタッフの増減や条件変更があったら、手元のYAMLを直してから書き出す。
+
+```bash
+./venv/bin/python cli.py upload-profiles \
+  --profiles data/staff_profiles/case001.yaml \
+  --secrets .streamlit/secrets.toml
+```
+
+### 9. 希望入力のWebアプリ
 
 施設の担当者がブラウザで希望を入力する画面。
 
@@ -185,5 +206,5 @@ Streamlit Cloud への公開手順は `DEPLOY.md` を見る。
 - [x] OR-Tools CP-SATによる勤務表生成
 - [x] 実物と同じ体裁のExcel出力
 - [x] 希望入力のWebアプリ(Streamlit)
-- [ ] Webアプリに入力された希望を勤務表生成につなぐ
+- [x] Webアプリに入力された希望を勤務表生成につなぐ
 - [ ] 検証レポート
