@@ -1,0 +1,18 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 個人情報(スタッフの実名・勤務条件・希望休)。GitHubに上げない。
+data/
+!data/**/.gitkeep
+.streamlit/secrets.toml
+
+# 実物の勤務表(個人情報を含む)
+/*.xlsx
+/*.numbers
+
+# 施設の内部情報。アプリの動作には不要なので上げない。
+# 34名の苗字と勤務表の番号の対応表、実物の勤務表の分析が入っている。
+docs/
+.DS_Store
