@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+import io
 from datetime import date
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from kawashima_schedule.calendar_utils import month_days, month_label  # noqa: E
 from kawashima_schedule.profile_store import load_profiles  # noqa: E402
 from kawashima_schedule.request_sheet import WISH_CHOICES, StaffRequests  # noqa: E402
 from kawashima_schedule.request_storage import get_storage  # noqa: E402
+from kawashima_schedule.excel_export import export_schedule  # noqa: E402
+from kawashima_schedule.scheduler import build_schedule  # noqa: E402
 from kawashima_schedule.shifts import (  # noqa: E402
     ABSENCE_MARKS,
     DAY_SHIFTS,
@@ -46,7 +49,17 @@ MEANING = {
 
 
 def main() -> None:
-    st.set_page_config(page_title="希望休・希望出勤の入力", layout="wide")
+    st.set_page_config(page_title="勤務表", layout="wide")
+
+    # 上のタブで画面を切り替える。URLを分けると案内が増えるので1つにまとめる。
+    wish_tab, build_tab = st.tabs(["希望を入力する", "勤務表を作る"])
+    with wish_tab:
+        _wish_page()
+    with build_tab:
+        _build_page()
+
+
+def _wish_page() -> None:
     st.title("希望休・希望出勤の入力")
 
     storage = get_storage(_secrets(), PROFILES_PATH.parent)
@@ -104,6 +117,71 @@ def main() -> None:
     _show_summary(edited, days)
 
 
+def _build_page() -> None:
+    """勤務表を作ってダウンロードする画面。"""
+    st.title("勤務表を作る")
+
+    storage = get_storage(_secrets(), PROFILES_PATH.parent)
+    try:
+        profiles = storage.load_profiles() or _load_profiles()
+    except Exception as error:
+        st.error("スタッフ情報の読み込みに失敗しました。")
+        st.exception(error)
+        return
+    if not profiles:
+        st.error("スタッフ情報がまだ登録されていません。")
+        return
+
+    year, month = _pick_month(key="build")
+    requests = storage.load(year, month)
+    filled = [r for r in requests if r.entries]
+
+    st.write(
+        f"**{month_label(year, month)}** … スタッフ {len(profiles)} 名 / "
+        f"希望の記入 **{len(filled)} 名分**"
+    )
+    if not filled:
+        st.warning("この月の希望はまだ1件も入っていません。このまま作ることもできます。")
+
+    if not st.button("勤務表を作る", type="primary", key="build-button"):
+        return
+
+    with st.spinner("組んでいます。1分ほどかかることがあります..."):
+        result = build_schedule(profiles, requests, year, month, time_limit_seconds=120)
+
+    if not result.ok:
+        st.error(f"組めませんでした（{result.status}）")
+        for message in result.messages:
+            st.write(f"- {message}")
+        return
+
+    st.success(
+        f"できました（{result.status}） … {len(result.assignments)} 名 / "
+        f"責任者「せ」{len(result.responsible)} 日"
+    )
+    with st.expander("組んだときのメモ", expanded=False):
+        for message in result.messages:
+            st.write(f"- {message}")
+
+    st.download_button(
+        "Excelをダウンロード",
+        data=_to_excel_bytes(result, profiles),
+        file_name=f"勤務計画表_{year}年{month:02d}月_2病棟全体.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
+
+
+def _to_excel_bytes(result, profiles) -> bytes:
+    """Excelを作ってバイト列で返す。Cloudではファイルを残せないため。"""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "schedule.xlsx"
+        export_schedule(result, profiles, path)
+        return path.read_bytes()
+
+
 # --- 部品 ---------------------------------------------------------------------
 
 
@@ -127,12 +205,16 @@ def _secrets():
         return None
 
 
-def _pick_month():
+def _pick_month(key: str = "wish"):
     today = date.today()
     default_year, default_month = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
     col1, col2 = st.columns(2)
-    year = col1.number_input("年", min_value=2020, max_value=2100, value=default_year, step=1)
-    month = col2.number_input("月", min_value=1, max_value=12, value=default_month, step=1)
+    year = col1.number_input(
+        "年", min_value=2020, max_value=2100, value=default_year, step=1, key=f"{key}-year"
+    )
+    month = col2.number_input(
+        "月", min_value=1, max_value=12, value=default_month, step=1, key=f"{key}-month"
+    )
     return int(year), int(month)
 
 
