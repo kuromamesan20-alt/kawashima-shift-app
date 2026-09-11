@@ -16,3 +16,9 @@ data/
 # 34名の苗字と勤務表の番号の対応表、実物の勤務表の分析が入っている。
 docs/
 .DS_Store
+
+# Googleサービスアカウントの鍵。絶対にGitHubに上げない。
+*.json
+!.claude/launch.json
+Streamlitに貼る内容.txt
+*secrets*

@@ -40,6 +40,7 @@ from kawashima_schedule.questions import apply_answers, build_questions  # noqa:
 from kawashima_schedule.review_report import render_html  # noqa: E402
 from kawashima_schedule.excel_export import export_schedule  # noqa: E402
 from kawashima_schedule.scheduler import build_schedule  # noqa: E402
+from kawashima_schedule.request_storage import GoogleSheetStorage  # noqa: E402
 
 
 def cmd_extract_profiles(args: argparse.Namespace) -> int:
@@ -325,6 +326,53 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_upload_profiles(args: argparse.Namespace) -> int:
+    """スタッフ情報をGoogleスプレッドシートに書き出す。
+
+    Webアプリは個人情報をGitHubに置かないため、スタッフ情報も
+    スプレッドシート側に持たせる。その1回きりの書き出し。
+    """
+    profiles_path = Path(args.profiles)
+    secrets_path = Path(args.secrets)
+    for path in (profiles_path, secrets_path):
+        if not path.exists():
+            print(f"エラー: ファイルが見つかりません: {path}", file=sys.stderr)
+            return 1
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9/3.10
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            print(
+                "エラー: TOMLを読む部品がありません。次を実行してください:\n"
+                "  ./venv/bin/pip install tomli",
+                file=sys.stderr,
+            )
+            return 1
+
+    with secrets_path.open("rb") as handle:
+        secrets = tomllib.load(handle)
+
+    sheet_id = secrets.get("requests_sheet_id")
+    account = secrets.get("gcp_service_account")
+    if not sheet_id or not account:
+        print(
+            "エラー: secrets に requests_sheet_id と gcp_service_account が要ります",
+            file=sys.stderr,
+        )
+        return 1
+
+    profiles = load_profiles(profiles_path)
+    storage = GoogleSheetStorage(sheet_id=str(sheet_id), credentials=dict(account))
+    storage.save_profiles(profiles)
+
+    print(f"スタッフ {len(profiles)} 名をスプレッドシートに書き出しました。")
+    print("Webアプリを再読み込みすると反映されます。")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="勤務表作成ツール")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -410,6 +458,15 @@ def main() -> int:
     generate.add_argument("--out", required=True, help="出力するExcelのパス")
     generate.add_argument("--time-limit", type=float, default=120.0, help="計算の制限時間(秒)")
     generate.set_defaults(func=cmd_generate)
+
+    upload = subparsers.add_parser(
+        "upload-profiles", help="スタッフ情報をGoogleスプレッドシートに書き出す"
+    )
+    upload.add_argument("--profiles", required=True, help="構造化YAMLのパス")
+    upload.add_argument(
+        "--secrets", required=True, help="Streamlitに貼ったのと同じ内容のTOMLファイル"
+    )
+    upload.set_defaults(func=cmd_upload_profiles)
 
     args = parser.parse_args()
     return args.func(args)

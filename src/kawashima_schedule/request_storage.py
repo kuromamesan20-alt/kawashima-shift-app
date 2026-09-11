@@ -20,6 +20,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 DEFAULT_WORKSHEET = "requests"
+# スタッフ情報を置くシート。1行1人で、条件は YAML のまま1セルに入れる。
+# 項目が40近くあり今後も増えるため、列に展開せず丸ごと持たせる。
+PROFILES_WORKSHEET = "staff_profiles"
+PROFILE_HEADER = ["スタッフID", "名前", "勤務条件(YAML)"]
 HEADER = ["年", "月", "スタッフID", "名前", "日", "記号"]
 
 
@@ -42,6 +46,13 @@ class RequestStorage:
         raise NotImplementedError
 
     def status(self) -> StorageStatus:
+        raise NotImplementedError
+
+    def load_profiles(self):
+        """スタッフ情報を読む。置き場所が無ければ None を返す。"""
+        return None
+
+    def save_profiles(self, profiles) -> None:
         raise NotImplementedError
 
 
@@ -68,6 +79,17 @@ class LocalStorage(RequestStorage):
 
         save_requests(list(requests), self._path(year, month))
 
+    def load_profiles(self):
+        from .profile_store import load_profiles as _load
+
+        path = self.directory / "case001.yaml"
+        return _load(path) if path.exists() else None
+
+    def save_profiles(self, profiles) -> None:
+        from .profile_store import save_profiles as _save
+
+        _save(list(profiles), self.directory / "case001.yaml")
+
     def status(self) -> StorageStatus:
         return StorageStatus(
             provider="この端末のファイル",
@@ -90,21 +112,33 @@ class GoogleSheetStorage(RequestStorage):
         self.credentials = credentials
         self.worksheet_name = worksheet
 
-    def _worksheet(self):
+    def _book(self):
         import gspread
         from google.oauth2.service_account import Credentials
 
         creds = Credentials.from_service_account_info(self.credentials, scopes=SCOPES)
-        book = gspread.authorize(creds).open_by_key(self.sheet_id)
+        return gspread.authorize(creds).open_by_key(self.sheet_id)
+
+    def _sheet(self, name: str, header: List[str], create: bool = True):
+        """名前でシートを取り、見出しを整える。
+
+        create=False のときは、無ければ None を返す(まだ用意していない状態)。
+        """
+        book = self._book()
         try:
-            sheet = book.worksheet(self.worksheet_name)
+            sheet = book.worksheet(name)
         except Exception:
-            sheet = book.add_worksheet(self.worksheet_name, rows=2000, cols=len(HEADER))
-            sheet.update("A1", [HEADER])
+            if not create:
+                return None
+            sheet = book.add_worksheet(name, rows=2000, cols=len(header))
+            sheet.update("A1", [header])
             return sheet
-        if sheet.row_values(1) != HEADER:
-            sheet.update("A1", [HEADER])
+        if sheet.row_values(1) != header:
+            sheet.update("A1", [header])
         return sheet
+
+    def _worksheet(self):
+        return self._sheet(self.worksheet_name, HEADER, create=True)
 
     def load(self, year: int, month: int) -> List[StaffRequests]:
         rows = self._worksheet().get_all_records()
@@ -168,6 +202,55 @@ class GoogleSheetStorage(RequestStorage):
         target = needed_rows + buffer_rows
         if getattr(sheet, "row_count", 0) < target:
             sheet.resize(rows=target)
+
+    def load_profiles(self):
+        """スタッフ情報をスプレッドシートから読む。
+
+        1行1人。勤務条件は YAML のまま1セルに入っているので、
+        そのまま組み立て直す。シートが無ければ None(未設定)。
+        """
+        import yaml
+
+        try:
+            sheet = self._sheet(PROFILES_WORKSHEET, PROFILE_HEADER, create=False)
+        except Exception:
+            return None
+        if sheet is None:
+            return None
+
+        from .profile_store import _from_dict
+
+        profiles = []
+        for row in sheet.get_all_records():
+            body = str(row.get("勤務条件(YAML)", "")).strip()
+            if not body:
+                continue
+            try:
+                entry = yaml.safe_load(body)
+            except yaml.YAMLError:
+                continue
+            if isinstance(entry, dict):
+                profiles.append(_from_dict(entry))
+        return profiles or None
+
+    def save_profiles(self, profiles) -> None:
+        """スタッフ情報をスプレッドシートに書き出す。"""
+        import yaml
+        from dataclasses import asdict
+
+        from .profile_store import _to_dict
+
+        sheet = self._sheet(PROFILES_WORKSHEET, PROFILE_HEADER, create=True)
+        rows = [PROFILE_HEADER]
+        for profile in profiles:
+            body = yaml.safe_dump(
+                _to_dict(profile), allow_unicode=True, sort_keys=False, width=10000
+            )
+            rows.append([profile.staff_id, profile.name, body])
+
+        self._ensure_capacity(sheet, len(rows))
+        last = get_column_letter(len(PROFILE_HEADER))
+        sheet.update(f"A1:{last}{len(rows)}", rows)
 
     def status(self) -> StorageStatus:
         return StorageStatus(

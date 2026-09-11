@@ -49,16 +49,24 @@ def main() -> None:
     st.set_page_config(page_title="希望休・希望出勤の入力", layout="wide")
     st.title("希望休・希望出勤の入力")
 
-    profiles = _load_profiles()
+    storage = get_storage(_secrets(), PROFILES_PATH.parent)
+    status = storage.status()
+
+    # スタッフ情報は保存先(スプレッドシート)から読む。
+    # 個人情報なのでGitHubには置かないため、手元のファイルは予備。
+    profiles = storage.load_profiles() or _load_profiles()
     if not profiles:
-        st.error(f"スタッフ情報が見つかりません: {PROFILES_PATH}")
+        st.error("スタッフ情報がまだ登録されていません。")
+        st.markdown(
+            "スプレッドシートに `staff_profiles` シートを作り、スタッフ情報を"
+            "書き出してください。手順は開発者にお問い合わせください。"
+        )
+        st.caption(f"保存先: {status.provider}")
         return
 
     year, month = _pick_month()
     active = [p for p in profiles if not p.is_on_leave(year, month)]
 
-    storage = get_storage(_secrets(), PROFILES_PATH.parent)
-    status = storage.status()
     st.caption(f"保存先: {status.provider} — {status.message}")
 
     saved = {r.staff_id: r for r in storage.load(year, month)}
