@@ -24,13 +24,17 @@ _WEEKDAY_INDEX = {name: i for i, name in enumerate(WEEKDAY_NAMES)}
 
 # --- 回数レンジ ---------------------------------------------------------------
 # 「夜勤3〜4回」「深夜2回〜4回」「夜勤3回か4回」「夜勤5回から6回」
+# 区分と回数の間に挟まる言い回し。「夜勤専従で毎月2〜3回」「深夜は月に3回」など。
+# ここを許さないと回数が読めず、しかも文自体は「夜勤専従」で解釈済みになるため
+# 回数だけが黙って落ちる。
+_COUNT_GAP = r"(?:勤務)?(?:専従)?(?:で|は|を|も)?\s*(?:毎月|月間|月に|月)?\s*"
 _RANGE_RE = re.compile(
-    r"(夜勤|深夜)(?:勤務)?(?:は)?\s*(\d+)\s*回?\s*(?:〜|-|から|か)\s*(\d+)\s*回"
+    rf"(夜勤|深夜){_COUNT_GAP}(\d+)\s*回?\s*(?:〜|-|から|か)\s*(\d+)\s*回"
 )
 # 「夜勤3回以下」「深夜3回まで」
-_UPTO_RE = re.compile(r"(夜勤|深夜)(?:勤務)?(?:は)?\s*(\d+)\s*回?(?:以下|まで)")
+_UPTO_RE = re.compile(rf"(夜勤|深夜){_COUNT_GAP}(\d+)\s*回?(?:以下|まで)")
 # 「夜勤3回」「深夜3回希望」
-_EXACT_RE = re.compile(r"(夜勤|深夜)(?:勤務)?(?:は)?\s*(\d+)\s*回")
+_EXACT_RE = re.compile(rf"(夜勤|深夜){_COUNT_GAP}(\d+)\s*回")
 # 「やむを得ない場合は2回可」— 直前に出た区分の上限を広げる
 _EXCEPTION_RE = re.compile(r"やむを得ない場合(?:は)?\s*(\d+)\s*回")
 
@@ -107,6 +111,39 @@ class ConditionParser:
                         code="unparsed",
                         sentence=sentence,
                     )
+        self._cross_check_counts(profile)
+
+    @staticmethod
+    def _cross_check_counts(profile: StaffProfile) -> None:
+        """入れない区分に回数が付いている矛盾を、黙って捨てずに確認に回す。
+
+        「深夜勤務のみ。夜勤専従で毎月2〜3回」のように、原文が「夜勤」と「深夜」を
+        区別せずに書いていることがある。どちらの回数なのかはこちらでは決められない。
+        """
+        if profile.late_night_only and profile.night_shift_count:
+            low, high = profile.night_shift_count
+            profile.flag_review(
+                f"「深夜勤務のみ」の方に夜勤 {low}〜{high}回 と書かれています。"
+                "深夜の回数のことでしょうか",
+                code="count_conflict",
+                label=f"{profile.name}/夜勤回数",
+            )
+        if profile.night_shift_exclusive and profile.late_night_shift_count:
+            low, high = profile.late_night_shift_count
+            profile.flag_review(
+                f"「夜勤専従」の方に深夜 {low}〜{high}回 と書かれています。"
+                "夜勤の回数のことでしょうか",
+                code="count_conflict",
+                label=f"{profile.name}/深夜回数",
+            )
+        if profile.day_shift_only and (
+            profile.night_shift_count or profile.late_night_shift_count
+        ):
+            profile.flag_review(
+                "「日勤のみ」の方に夜勤・深夜の回数が書かれています",
+                code="count_conflict",
+                label=f"{profile.name}/日勤のみ",
+            )
 
     # -- 1文の解釈 -------------------------------------------------------------
 

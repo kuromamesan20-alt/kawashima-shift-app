@@ -394,3 +394,33 @@ def test_last_resort_without_a_base_shift_is_flagged_not_guessed():
     profile = parse("早出は他の人を優先してください")
     assert profile.last_resort_day_shifts == []
     assert profile.needs_review
+
+
+# --- 回数表現の取りこぼし(実データで見つかった漏れ) ------------------------------
+
+
+def _parse(text: str) -> StaffProfile:
+    profile = StaffProfile(staff_id="t", name="テスト", role="介護士", raw_conditions=text)
+    ConditionParser([]).apply(profile)
+    return profile
+
+
+def test_毎月をはさんだ回数レンジが読める():
+    """「夜勤は毎月2〜3回」— 区分と回数の間に「毎月」が入る書き方。"""
+    assert _parse("夜勤は毎月2〜3回希望").night_shift_count == (2, 3)
+
+
+def test_月にをはさんだ上限が読める():
+    assert _parse("深夜は月に3回まで").late_night_shift_count == (0, 3)
+
+
+def test_専従の文に同居した回数を落とさない():
+    """「夜勤専従で毎月2〜3回」で、専従だけ拾って回数を捨てないこと。"""
+    profile = _parse("夜勤専従で毎月2〜3回希望してくるのもを検討して確定。")
+    assert profile.night_shift_exclusive is True
+    assert profile.night_shift_count == (2, 3)
+
+
+def test_深夜のみの人に夜勤回数があれば確認に回す():
+    profile = _parse("深夜勤務のみ。夜勤専従で毎月2〜3回希望。")
+    assert any(item.code == "count_conflict" for item in profile.review_items)
