@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kawashima_schedule.excel_export import (  # noqa: E402
     SUMMARY,
-    _count,
+    SUMMARY_MARKS,
+    _countif_formula,
     _order_staff,
     _split_mark,
 )
@@ -21,77 +22,36 @@ from kawashima_schedule.models import StaffProfile  # noqa: E402
 from kawashima_schedule.scheduler import ScheduleResult  # noqa: E402
 
 
-def _empty_counts():
-    return {label: 0 for label in SUMMARY}
+# --- 集計の式 ------------------------------------------------------------------
 
 
-# --- _count -------------------------------------------------------------------
+def test_集計は数字ではなく式で入れる():
+    """受け取った側が手直ししたら、その場で合計が変わる必要がある。"""
+    formula = _countif_formula("E6:K6", ("公",))
+    assert formula == '=COUNTIF(E6:K6,"公")'
 
 
-def test_count_day_shift_marks():
-    counts = _empty_counts()
-    for mark in ("日①", "日②", "日③", "日", "日⑤", "日⑦", "日⑨"):
-        _count(counts, mark)
-    assert counts["日勤"] == 7
+def test_複数の記号はすべて足し合わせる():
+    formula = _countif_formula("E6:K6", ("研", "健"))
+    assert formula == '=COUNTIF(E6:K6,"研")+COUNTIF(E6:K6,"健")'
 
 
-def test_count_night_in_mark():
-    counts = _empty_counts()
-    _count(counts, "○")
-    assert counts["夜勤"] == 1
+def test_残業は空欄のまま():
+    """実物の手書き欄なので、記号からは決められない。"""
+    assert SUMMARY_MARKS["残業"] == ()
+    assert _countif_formula("E6:K6", SUMMARY_MARKS["残業"]) is None
 
 
-def test_count_late_night_in_mark():
-    counts = _empty_counts()
-    _count(counts, "◉")
-    assert counts["深夜"] == 1
+def test_日勤は番号付きの勤務だけを数える():
+    """時間を直接書く方のセル(「9-16時」など)は日勤に数えない(確認済み)。"""
+    assert SUMMARY_MARKS["日勤"] == ("日①", "日②", "日③", "日", "日⑤", "日⑦", "日⑨")
+    formula = _countif_formula("E6:K6", SUMMARY_MARKS["日勤"])
+    assert "9-16時" not in formula
+    assert "09:00" not in formula
 
 
-def test_count_off_mark():
-    counts = _empty_counts()
-    _count(counts, "公")
-    assert counts["公休"] == 1
-
-
-def test_count_paid_leave_mark():
-    counts = _empty_counts()
-    _count(counts, "有")
-    assert counts["有休"] == 1
-
-
-def test_count_summer_leave_mark():
-    counts = _empty_counts()
-    _count(counts, "夏")
-    assert counts["夏正"] == 1
-
-
-def test_count_training_and_health_check_marks():
-    counts = _empty_counts()
-    _count(counts, "研")
-    _count(counts, "健")
-    assert counts["出研"] == 2
-
-
-def test_count_written_hours_are_counted_as_day_shift():
-    """パート職員などの時間直書き(「09:00-15:00」)は日勤帯として数える。"""
-    counts = _empty_counts()
-    _count(counts, "09:00-15:00")
-    assert counts["日勤"] == 1
-
-
-def test_count_ignores_unknown_or_blank_marks():
-    counts = _empty_counts()
-    _count(counts, "")
-    _count(counts, "せ")
-    assert sum(counts.values()) == 0
-
-
-def test_overtime_column_is_never_auto_filled():
-    """残業は実物の手書き欄なので、_count はどんなマークでも増やさない。"""
-    counts = _empty_counts()
-    for mark in ("日①", "○", "◉", "公", "有", "夏", "研", "健", "09:00-15:00"):
-        _count(counts, mark)
-    assert counts["残業"] == 0
+def test_集計の項目がすべて定義されている():
+    assert set(SUMMARY) == set(SUMMARY_MARKS)
 
 
 # --- _split_mark ----------------------------------------------------------------
@@ -167,3 +127,103 @@ def test_order_staff_excludes_people_not_in_the_result():
 
     ordered = [p.staff_id for p in _order_staff([listed, not_listed], result)]
     assert ordered == ["a"]
+
+
+# --- 書き出したExcelの式が正しい数を出すか ------------------------------------------
+
+
+def _evaluate_countif(sheet, formula: str) -> int:
+    """=COUNTIF(範囲,"記号")+... を、実際のセルの中身に当てて数える。
+
+    openpyxl は式を計算しないので、ここで同じことをして突き合わせる。
+    """
+    total = 0
+    for part in formula.lstrip("=").split("+"):
+        inside = part[part.index("(") + 1 : part.rindex(")")]
+        cell_range, _, mark = inside.partition(",")
+        mark = mark.strip('"')
+        for row in sheet[cell_range]:
+            for cell in row:
+                if cell.value == mark:
+                    total += 1
+    return total
+
+
+def _build_sheet(tmp_path):
+    from datetime import date
+
+    from openpyxl import load_workbook
+
+    from kawashima_schedule.calendar_utils import Day
+    from kawashima_schedule.excel_export import export_schedule
+
+    profiles = [
+        StaffProfile(staff_id="a", name="職員A", role="看護師", sheet_label="1", unit="ばら"),
+        StaffProfile(staff_id="b", name="職員B", role="介護士", sheet_label="①", unit="ばら"),
+    ]
+    days = [Day(date(2026, 9, day)) for day in range(1, 6)]
+    result = ScheduleResult(
+        status="最適",
+        year=2026,
+        month=9,
+        days=days,
+        assignments={
+            "a": {1: "日①", 2: "日", 3: "公", 4: "有", 5: "○"},
+            "b": {1: "◉", 2: "公", 3: "研", 4: "健", 5: "夏"},
+        },
+    )
+    path = tmp_path / "out.xlsx"
+    export_schedule(result, profiles, path)
+    return load_workbook(path)[  # 式をそのまま読む
+        "勤務計画表"
+    ]
+
+
+def test_右端の集計の式が正しい数を出す(tmp_path):
+    sheet = _build_sheet(tmp_path)
+    from kawashima_schedule.excel_export import FIRST_DAY_COLUMN, FIRST_STAFF_ROW
+
+    expected = {
+        FIRST_STAFF_ROW: {"日勤": 2, "夜勤": 1, "深夜": 0, "公休": 1, "有休": 1, "夏正": 0, "出研": 0},
+        FIRST_STAFF_ROW + 2: {"日勤": 0, "夜勤": 0, "深夜": 1, "公休": 1, "有休": 0, "夏正": 1, "出研": 2},
+    }
+    for row, wanted in expected.items():
+        for offset, label in enumerate(SUMMARY):
+            cell = sheet.cell(row=row, column=FIRST_DAY_COLUMN + 5 + offset)
+            if label == "残業":
+                assert cell.value is None, "残業は空欄のまま"
+                continue
+            assert str(cell.value).startswith("="), f"{label}は式であること"
+            assert _evaluate_countif(sheet, cell.value) == wanted[label], (
+                f"{row}行目の{label}: 式 {cell.value}"
+            )
+
+
+def test_日別チェックの式が正しい数を出す(tmp_path):
+    sheet = _build_sheet(tmp_path)
+    from kawashima_schedule.excel_export import FIRST_DAY_COLUMN
+
+    found = None
+    for row in range(1, sheet.max_row + 1):
+        if sheet.cell(row=row, column=4).value == "日①":
+            found = row
+            break
+    assert found, "日別チェックの「日①」行が見つからない"
+
+    cell = sheet.cell(row=found, column=FIRST_DAY_COLUMN)  # 1日
+    assert str(cell.value).startswith("=COUNTIF(")
+    assert _evaluate_countif(sheet, cell.value) == 1, "1日の日①は1人"
+
+    cell = sheet.cell(row=found, column=FIRST_DAY_COLUMN + 1)  # 2日
+    assert _evaluate_countif(sheet, cell.value) == 0, "2日の日①は0人"
+
+
+def test_そろっているかの判定も式で入る(tmp_path):
+    sheet = _build_sheet(tmp_path)
+    for row in range(1, sheet.max_row + 1):
+        if sheet.cell(row=row, column=2).value == "6種そろっているか":
+            value = str(sheet.cell(row=row, column=5).value)
+            assert value.startswith("=IF(AND("), value
+            assert '"○","×"' in value
+            return
+    raise AssertionError("判定行が見つからない")

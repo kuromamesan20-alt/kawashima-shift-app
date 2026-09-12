@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 from openpyxl import Workbook
+from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -45,8 +46,23 @@ HEADER_ROW, WEEKDAY_ROW, EVENT_ROW = 3, 4, 5
 FIRST_STAFF_ROW = 6
 
 SUMMARY = ("日勤", "夜勤", "深夜", "公休", "残業", "有休", "夏正", "出研")
-# 「残業」は実物の勤務表にある手書き欄。ここでは記号から機械的に判定できないため、
-# _count() では意図的に埋めない(常に空欄のまま)。
+# 集計の中身は数字ではなく Excel の計算式で入れる。
+# この勤務表はたたき台で、受け取った側が手直しする前提のため、
+# セルを書き換えたら右端と下の集計もその場で変わる必要がある。
+#
+# 「残業」は実物の勤務表にある手書き欄。記号からは決められないので空欄のまま。
+# 「日勤」は番号付きの勤務だけを数える。時間を直接書く方のセル(「9-16時」など)は
+# 数えない(施設の担当者に確認済み)。
+SUMMARY_MARKS: Dict[str, tuple] = {
+    "日勤": tuple(DAY_SHIFTS),
+    "夜勤": (NIGHT_IN,),
+    "深夜": (LATE_NIGHT_IN,),
+    "公休": (OFF,),
+    "残業": (),
+    "有休": (PAID_LEAVE,),
+    "夏正": (SUMMER_LEAVE,),
+    "出研": (TRAINING, HEALTH_CHECK),
+}
 UNIT_ORDER = ("ばら", "さくら", "ゆり", "すみれ")
 
 _HEAD_FILL = PatternFill("solid", fgColor="2F5D8C")
@@ -97,7 +113,8 @@ def export_schedule(
         previous_unit = unit
         row += 2
 
-    _write_daily_check(sheet, row + 1, days, result, profiles)
+    staff_rows = (FIRST_STAFF_ROW, max(FIRST_STAFF_ROW, row - 1))
+    _write_daily_check(sheet, row + 1, days, staff_rows)
     _finish_layout(sheet, days, len(ordered))
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,7 +224,6 @@ def _write_staff(sheet, row: int, profile, result, unit_label: str) -> None:
     sheet.cell(row=row + 1, column=LABEL_COLUMN).border = _BORDER
 
     assignment = result.assignments.get(profile.staff_id, {})
-    counts = {label: 0 for label in SUMMARY}
 
     for index, day in enumerate(result.days):
         column = FIRST_DAY_COLUMN + index
@@ -220,12 +236,11 @@ def _write_staff(sheet, row: int, profile, result, unit_label: str) -> None:
             extra = f"{extra} {RESPONSIBLE}".strip() if extra else RESPONSIBLE
         _write_mark(sheet, row + 1, column, extra, day.is_weekend, small=True)
 
-        _count(counts, main)
-
+    days_range = _row_range(row, len(result.days))
     for offset, label in enumerate(SUMMARY):
         cell = sheet.cell(
             row=row, column=FIRST_DAY_COLUMN + len(result.days) + offset,
-            value=counts[label] or None,
+            value=_countif_formula(days_range, SUMMARY_MARKS[label]),
         )
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = _BORDER
@@ -256,65 +271,94 @@ def _write_mark(sheet, row: int, column: int, value: str, weekend: bool, small=F
         cell.fill = _WEEKEND_FILL
 
 
-def _count(counts: Dict[str, int], mark: str) -> None:
-    if mark in DAY_SHIFTS or (mark and mark[0].isdigit()):
-        counts["日勤"] += 1
-    elif mark == NIGHT_IN:
-        counts["夜勤"] += 1
-    elif mark == LATE_NIGHT_IN:
-        counts["深夜"] += 1
-    elif mark == OFF:
-        counts["公休"] += 1
-    elif mark == PAID_LEAVE:
-        counts["有休"] += 1
-    elif mark == SUMMER_LEAVE:
-        counts["夏正"] += 1
-    elif mark in (TRAINING, HEALTH_CHECK):
-        counts["出研"] += 1
+def _row_range(row: int, day_count: int) -> str:
+    """その人の勤務欄(1行分)の範囲。例: E6:AI6"""
+    first = get_column_letter(FIRST_DAY_COLUMN)
+    last = get_column_letter(FIRST_DAY_COLUMN + day_count - 1)
+    return f"{first}{row}:{last}{row}"
+
+
+def _countif_formula(cell_range: str, marks) -> str:
+    """その範囲に marks がいくつあるかを数える式。marks が空なら空欄。
+
+    数字ではなく式で入れるのは、受け取った側が勤務表を手直ししたときに
+    集計がその場で変わるようにするため。
+    """
+    if not marks:
+        return None
+    return "=" + "+".join(f'COUNTIF({cell_range},"{mark}")' for mark in marks)
 
 
 # --- 最下部の集計 --------------------------------------------------------------
 
 
-def _write_daily_check(sheet, row: int, days, result, profiles) -> None:
-    """番号付き6種が毎日そろっているかを確かめる行。実物にも同じものがある。"""
-    support = {p.staff_id for p in profiles if p.is_support_staff}
+def _write_daily_check(sheet, row: int, days, staff_rows) -> None:
+    """番号付き6種が毎日そろっているかを確かめる行。実物にも同じものがある。
+
+    こちらも数字ではなく式で入れる。勤務表を手直ししたときに、
+    その日がそろっているかどうかがその場で分かるようにするため。
+
+    数える範囲はスタッフ欄ぜんぶ(1人2行の2行目も含む)。2行目には中抜けの
+    時間と「せ」しか入らず、番号付きの記号とは一致しないので混ざらない。
+    """
     label = sheet.cell(row=row, column=ROLE_COLUMN, value="日別チェック")
     label.font = Font(bold=True, size=9)
 
-    per_day = []
-    for index, day in enumerate(days):
-        counts = {}
-        for staff_id, assignment in result.assignments.items():
-            if staff_id in support:
-                continue
-            mark = _split_mark(assignment.get(day.day, ""))[0]
-            counts[mark] = counts.get(mark, 0) + 1
-        per_day.append(counts)
+    first_staff_row, last_staff_row = staff_rows
+    codes = REQUIRED_DAY_SHIFTS + (NIGHT_IN, LATE_NIGHT_IN)
+    count_rows = {}
 
-    for offset, code in enumerate(REQUIRED_DAY_SHIFTS + (NIGHT_IN, LATE_NIGHT_IN)):
+    for offset, code in enumerate(codes):
         line = row + 1 + offset
+        count_rows[code] = line
         sheet.cell(row=line, column=LABEL_COLUMN, value=code).alignment = Alignment(
             horizontal="center"
         )
         for index, day in enumerate(days):
-            count = per_day[index].get(code, 0)
-            cell = sheet.cell(row=line, column=FIRST_DAY_COLUMN + index, value=count)
+            letter = get_column_letter(FIRST_DAY_COLUMN + index)
+            cell = sheet.cell(
+                row=line,
+                column=FIRST_DAY_COLUMN + index,
+                value=f'=COUNTIF({letter}{first_staff_row}:{letter}{last_staff_row},"{code}")',
+            )
             cell.alignment = Alignment(horizontal="center")
             cell.font = Font(size=8)
             cell.border = _BORDER
 
-    judge = row + 1 + len(REQUIRED_DAY_SHIFTS) + 2
+    judge = row + 1 + len(codes) + 1
     sheet.cell(row=judge, column=ROLE_COLUMN, value="6種そろっているか").font = Font(
         bold=True, size=9
     )
     for index, day in enumerate(days):
-        ok = all(per_day[index].get(code, 0) == 1 for code in REQUIRED_DAY_SHIFTS)
-        cell = sheet.cell(row=judge, column=FIRST_DAY_COLUMN + index, value="○" if ok else "×")
+        letter = get_column_letter(FIRST_DAY_COLUMN + index)
+        conditions = ",".join(
+            f"{letter}{count_rows[code]}=1" for code in REQUIRED_DAY_SHIFTS
+        )
+        cell = sheet.cell(
+            row=judge,
+            column=FIRST_DAY_COLUMN + index,
+            value=f'=IF(AND({conditions}),"○","×")',
+        )
         cell.alignment = Alignment(horizontal="center")
         cell.border = _BORDER
-        if not ok:
-            cell.fill = _NG_FILL
+
+    _mark_shortage(sheet, judge, len(days))
+
+
+def _mark_shortage(sheet, judge_row: int, day_count: int) -> None:
+    """そろっていない日に色を付ける。
+
+    色も式で決める(条件付き書式)。固定の色だと、手直ししてそろった後も
+    赤いままになってしまう。
+    """
+    if not day_count:
+        return
+    first = get_column_letter(FIRST_DAY_COLUMN)
+    last = get_column_letter(FIRST_DAY_COLUMN + day_count - 1)
+    sheet.conditional_formatting.add(
+        f"{first}{judge_row}:{last}{judge_row}",
+        CellIsRule(operator="equal", formula=['"×"'], fill=_NG_FILL),
+    )
 
 
 def _finish_layout(sheet, days, staff_count: int) -> None:
