@@ -111,6 +111,11 @@ class StaffProfile:
     late_night_only: bool = False  # 深夜勤務のみ
     day_shift_only: bool = False  # 日勤のみ
     day_responsible: Optional[str] = None  # 日責 "可" / "不可" / "条件付き可"
+    # 看護職だが深夜(◉)に入れる人。
+    # 深夜は原則として介護職が入る。実物の2026年7月でも、看護職の深夜は
+    # 1人だけで、その人が全部担っていた。誰がその人かは施設によって違うので、
+    # コードに名前を書かず、ここで持つ。
+    can_late_night_as_nurse: bool = False
     # 師長。この人が出勤している日は、その人が責任者を担うので「せ」は付けない。
     # 休みの日だけ、日責が「可」の人を1人「せ」にする。
     is_head_nurse: bool = False

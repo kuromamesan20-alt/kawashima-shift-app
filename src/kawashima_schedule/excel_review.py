@@ -65,6 +65,8 @@ _COLUMNS: List[Tuple[str, Optional[str], int, bool, Optional[Sequence[str]]]] = 
     ("曜日限定で入れないシフト", "weekday_unavailable_shifts", 28, True, None),
     ("○ 夜勤", "can_night", 8, True, ("可", "不可")),
     ("◉ 深夜", "can_late_night", 8, True, ("可", "不可")),
+    # 深夜は原則として介護職が入る。看護職で入れる人だけ「可」にする。
+    ("看護職だが深夜可", "can_late_night_as_nurse", 14, True, (_YES, _NO)),
     ("夜勤 最少回数", "_night_min", 12, True, None),
     ("夜勤 最多回数", "_night_max", 12, True, None),
     ("深夜 最少回数", "_late_night_min", 12, True, None),
@@ -253,6 +255,7 @@ def _cell_value(profile: StaffProfile, attr: Optional[str]) -> Any:
         "random_days_allowed",
         "is_head_nurse",
         "is_support_staff",
+        "can_late_night_as_nurse",
     ):
         return _YES if value else _NO
     if attr in ("fixed_off_weekdays", "night_weekdays", "fixed_work_weekdays"):
@@ -369,6 +372,13 @@ def _apply_row(
     profile.can_night = _read_can(_text(cell("can_night")), "夜勤", profile.can_night, note)
     profile.can_late_night = _read_can(
         _text(cell("can_late_night")), "深夜", profile.can_late_night, note
+    )
+
+    profile.can_late_night_as_nurse = _read_yes_no(
+        _text(cell("can_late_night_as_nurse")),
+        "看護職だが深夜可",
+        profile.can_late_night_as_nurse,
+        note,
     )
 
     profile.night_shift_count = _range(

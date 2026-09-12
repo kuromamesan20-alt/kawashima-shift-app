@@ -64,8 +64,8 @@ WEIGHT_LAST_RESORT = 300
 WEIGHT_PARTNER_REPEAT = 25
 
 # 深夜(◉)は介護職が8〜9割。看護職で入るのは決まった人だけ。
-# 実物の2026年7月では、看護職の深夜3回はすべて齋藤さんだった。
-NURSES_ALLOWED_ON_LATE_NIGHT = ("齋藤",)
+# 深夜(◉)に入れる看護職は、profile.can_late_night_as_nurse で指定する。
+# 誰がその人かは施設ごとに違うので、コードに名前は書かない。
 
 # 見落とすと勤務表がおかしいまま渡ってしまう知らせに付ける印。
 # 画面側はこの印で並べ替えず、必ず目に入る場所に出す。
@@ -170,6 +170,9 @@ def build_schedule(
         result.messages.append(
             "条件を全部同時に満たす組み方が存在しません。"
             "毎日の必要人数に対して、入れる人が足りていない可能性があります。"
+        )
+        result.messages.extend(
+            _diagnose_shortage(solver_profiles, days, by_staff_request)
         )
         return result
     else:
@@ -318,10 +321,11 @@ def _add_night_composition(model, x, profiles, days) -> None:
     """夜間の顔ぶれを決める。
 
       ○(夜勤) 2人 … 看護職1人 + 介護職1人
-      ◉(深夜) 1人 … 原則は介護職。看護職で入れるのは決まった人だけ
+      ◉(深夜) 1人 … 原則は介護職。看護職で入れるのは
+                     can_late_night_as_nurse が立っている人だけ
 
     どちらも実物の2026年7月で確かめた(夜勤は31日中30日がこの組み合わせ、
-    深夜は介護職90%・看護職10%でその全部が同じ人)。
+    深夜は介護職90%・看護職10%でその全部が同じ1人)。
     """
     nurses = [p for p in profiles if p.is_nurse]
     caregivers = [p for p in profiles if p.is_caregiver]
@@ -338,7 +342,7 @@ def _add_night_composition(model, x, profiles, days) -> None:
 
     # 深夜に入れない看護職を止める
     for profile in profiles:
-        if not profile.is_nurse or profile.name in NURSES_ALLOWED_ON_LATE_NIGHT:
+        if not profile.is_nurse or profile.can_late_night_as_nurse:
             continue
         for day in days:
             model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
@@ -716,6 +720,69 @@ def _weekend_penalty(model, x, staff: str, days) -> List:
     return penalties
 
 
+def _diagnose_shortage(profiles, days, by_staff_request) -> List[str]:
+    """組めなかったときに、どの日が足りないのかを日付で示す。
+
+    「組めません」だけでは何を直せばよいか分からない。
+    希望休を入れすぎた日を見つけられるよう、日ごとの人手を数えて報告する。
+    ここでは連続勤務や夜勤の並びは見ていないので、ここに出ない日が
+    原因のこともある。あくまで当たりを付けるためのもの。
+    """
+    notes: List[str] = []
+    needed = sum(DAILY_REQUIREMENT.values())  # 日勤帯6 + ○2 + ◉1
+
+    short_days: List[str] = []
+    no_nurse: List[int] = []
+    no_late: List[int] = []
+    for day in days:
+        available = []
+        for profile in profiles:
+            request = by_staff_request.get(profile.staff_id)
+            if request and (
+                day.day in request.wish_off_days() or day.day in request.absence_days()
+            ):
+                continue
+            # その日固有の制限(曜日限定・日勤専従など)を反映した記号だけを見る。
+            # 常時フラグ(can_night等)だけで判定すると、曜日限定の夜勤者しか
+            # いない日でも「入れる人がいる」と誤診断してしまう。
+            entry = allowed_entry_marks(profile, day)
+            if entry:
+                available.append((profile, entry))
+
+        if len(available) < needed:
+            short_days.append(f"{day.day}日({len(available)}人/{needed}人)")
+        if not any(p.is_nurse and NIGHT_IN in entry for p, entry in available):
+            no_nurse.append(day.day)
+        if not any(
+            LATE_NIGHT_IN in entry and (not p.is_nurse or p.can_late_night_as_nurse)
+            for p, entry in available
+        ):
+            no_late.append(day.day)
+
+    if short_days:
+        notes.append(
+            f"{ALERT_MARK} 人手が足りない日: {'、'.join(short_days)}"
+            "(毎日この人数が要ります)。この日の希望休を減らすと組めるようになります"
+        )
+    if no_nurse:
+        notes.append(
+            f"{ALERT_MARK} ○夜勤に入れる看護職がいない日: "
+            f"{'、'.join(f'{d}日' for d in no_nurse)}"
+        )
+    if no_late:
+        notes.append(
+            f"{ALERT_MARK} ◉深夜に入れる人がいない日: "
+            f"{'、'.join(f'{d}日' for d in no_late)}"
+        )
+    if not notes:
+        notes.append(
+            "日ごとの人数だけを見ると足りています。"
+            "連続勤務の上限や夜勤の並び、同席の条件が重なって組めないようです。"
+            "希望休を少し減らすか、作成をお願いしている方にご相談ください"
+        )
+    return notes
+
+
 def _report_unusable_wishes(
     all_profiles, solver_profiles, days, result: "ScheduleResult", by_staff_request
 ) -> None:
@@ -849,8 +916,8 @@ def _fixed_hours_assignment(
         elif day.weekday in by_weekday:
             assignment[day.day] = "・".join(by_weekday[day.weekday])
         elif day.day in wish_work and wish_work[day.day] in SELF_WRITTEN_MARKS:
-            # 「日」や時短の「9-16」は、選ばれたものをそのままセルに書く。
-            # 中村さんのように「日勤または時短9-16時、8-15時」と条件にある人は、
+            # 「日」や時短は、選ばれたものをそのままセルに書く。
+            # 「日勤または時短9-16時、8-15時」のように勤務の形が複数ある人は、
             # その日どれで入るかを希望として選んでもらう。
             assignment[day.day] = wish_work[day.day]
         elif hours and (

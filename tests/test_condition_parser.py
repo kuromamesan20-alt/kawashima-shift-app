@@ -448,7 +448,7 @@ def test_夜勤不可は深夜にも入らない():
 
 
 def test_深夜と名指しされていればそちらが優先():
-    """「夜勤不可。深夜可能。」— 齋藤さんの書き方。実物でも◉だけ入っていた。"""
+    """「夜勤不可。深夜可能。」という書き方。実物でも◉だけ入っていた。"""
     profile = _parse("夜勤不可。深夜可能。")
     assert profile.can_night is False
     assert profile.can_late_night is True
@@ -496,42 +496,42 @@ def test_条件文の仮名が苗字に解決される():
 
     以前は照合できず、同席制約が6件すべて効いていなかった。
     """
-    parser = ConditionParser(["岩本", "蒔田"], {"スタッフは": "岩本", "スタッフW": "蒔田"})
+    parser = ConditionParser(["介護A", "看護A"], {"スタッフは": "介護A", "スタッフW": "看護A"})
     profile = StaffProfile(
-        staff_id="t", name="岩本", role="介護士", raw_conditions="夜勤はスタッフWと同席不可。"
+        staff_id="t", name="介護A", role="介護士", raw_conditions="夜勤はスタッフWと同席不可。"
     )
     parser.apply(profile)
 
     assert [(c.other_staff, c.kind) for c in profile.pair_constraints] == [
-        ("蒔田", "no_pair_night")
+        ("看護A", "no_pair_night")
     ]
 
 
 def test_接頭辞なしの2人目も苗字に解決される():
     """「スタッフEとW」の「W」も相手として拾う。"""
     parser = ConditionParser(
-        ["ヒバ", "荻原", "蒔田"],
-        {"スタッフさ": "ヒバ", "スタッフE": "荻原", "スタッフW": "蒔田"},
+        ["介護B", "看護B", "看護A"],
+        {"スタッフさ": "介護B", "スタッフE": "看護B", "スタッフW": "看護A"},
     )
     profile = StaffProfile(
-        staff_id="t", name="ヒバ", role="介護士", raw_conditions="夜勤スタッフEとWは同席不可。"
+        staff_id="t", name="介護B", role="介護士", raw_conditions="夜勤スタッフEとWは同席不可。"
     )
     parser.apply(profile)
 
-    assert sorted(c.other_staff for c in profile.pair_constraints) == ["荻原", "蒔田"]
+    assert sorted(c.other_staff for c in profile.pair_constraints) == ["看護A", "看護B"]
 
 
 def test_自分自身は同席相手にしない():
-    parser = ConditionParser(["岩本", "蒔田"], {"スタッフは": "岩本", "スタッフW": "蒔田"})
+    parser = ConditionParser(["介護A", "看護A"], {"スタッフは": "介護A", "スタッフW": "看護A"})
     profile = StaffProfile(
         staff_id="t",
-        name="岩本",
+        name="介護A",
         role="介護士",
         raw_conditions="夜勤はスタッフはとスタッフWは同席不可。",
     )
     parser.apply(profile)
 
-    assert [c.other_staff for c in profile.pair_constraints] == ["蒔田"]
+    assert [c.other_staff for c in profile.pair_constraints] == ["看護A"]
 
 
 def test_仮名が複数の人に付いていたら確認に回す():
@@ -539,9 +539,9 @@ def test_仮名が複数の人に付いていたら確認に回す():
     from kawashima_schedule.profile_builder import build_profiles
 
     rows = [
-        {"name": "岩本", "alias": "スタッフW", "conditions": "", "notes": "",
+        {"name": "介護A", "alias": "スタッフW", "conditions": "", "notes": "",
          "dayshift_responsible": "", "can_night": "可", "early": "", "late": ""},
-        {"name": "蒔田", "alias": "スタッフW", "conditions": "", "notes": "",
+        {"name": "看護A", "alias": "スタッフW", "conditions": "", "notes": "",
          "dayshift_responsible": "", "can_night": "可", "early": "", "late": ""},
     ]
     profiles = build_profiles(rows)

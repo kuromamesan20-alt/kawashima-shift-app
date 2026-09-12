@@ -149,13 +149,32 @@ def test_night_shift_is_one_nurse_and_one_caregiver():
     assert not StaffProfile(staff_id="x", name="環境", role="その他").is_caregiver
 
 
-def test_only_named_nurses_take_late_night():
-    """深夜(◉)に入れる看護職は決まった人だけ。"""
-    from kawashima_schedule.scheduler import NURSES_ALLOWED_ON_LATE_NIGHT
+def test_深夜に入れる看護職は指定された人だけ(monkeypatch):
+    """深夜(◉)は原則として介護職。看護職で入れるのは指定された人だけ。
 
-    assert NURSES_ALLOWED_ON_LATE_NIGHT, "誰も指定が無いと看護職が深夜に入れない"
-    assert "齋藤" in NURSES_ALLOWED_ON_LATE_NIGHT
+    誰がその人かは施設ごとに違うので、コードに名前は書かず
+    can_late_night_as_nurse で持つ。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    nurse = StaffProfile(
+        staff_id="nurse-late",
+        name="看護A",
+        role="看護師",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=True,
+    )
+    profiles = _staff_with_night_roles() + [nurse]
 
+    # 指定が無ければ、看護職は深夜に入れない → 深夜の枠が埋まらず組めない
+    assert not build_schedule(profiles, requests=[], year=2026, month=9).ok
+
+    nurse.can_late_night_as_nurse = True
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+    assert result.ok, result.messages
+    assert result.assignments["nurse-late"] == {1: LATE_NIGHT_IN}
 
 def test_staff_with_a_time_window_still_follows_the_limits():
     """「6時から17時の枠」のような時間指定があっても、常勤は上限の対象。
@@ -243,6 +262,45 @@ def test_深夜のみと夜勤専従が両方立っていても深夜に入れ�
 
     assert result.ok, result.messages
     assert result.assignments["both-1"] == {1: LATE_NIGHT_IN}
+
+
+def test_曜日限定の夜勤者しかいない日は入れる看護職がいないと報告する(monkeypatch):
+    """常時フラグ(can_night)だけでなく、その日固有の制限も見て診断すること。
+
+    看護職の夜勤可能曜日を金曜(4)だけにすると、can_night=True のままなので、
+    フラグだけを見ると火曜〜木曜でも「夜勤に入れる看護職はいる」と誤診断してしまう。
+    月を火曜(9/1)〜金曜(9/4)の4日間にして、金曜だけは入れる(=月から
+    丸ごと除外されない)が火曜〜木曜には入れない、という状態を作り、
+    allowed_entry_marks で当日ごとの制限まで見て正しく
+    「入れる看護職がいない」と報告できることを確かめる。
+    (夜勤の並びの制約が前日・翌々日を参照するため、日付は連続させる)
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [
+            Day(date(2026, 9, 1)),
+            Day(date(2026, 9, 2)),
+            Day(date(2026, 9, 3)),
+            Day(date(2026, 9, 4)),
+        ],
+    )
+    staff = _staff_with_night_roles()
+    nurse = next(p for p in staff if p.staff_id == "night-1")
+    nurse.night_weekdays = [4]  # 金曜のみ夜勤可(9/1〜3は○に入れない)
+    # 日勤には入れるようにしておく。そうしないと「その日は何も入れない人」として
+    # 数える前に除かれてしまい、常時フラグを見る書き方でも正しく見えてしまう。
+    # 「日」は毎日の必要人数の決まりが無いので、他の枠を奪わない。
+    nurse.available_day_shifts = ["日"]
+    profiles = staff + [_late_night_filler()]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert not result.ok
+    assert any(
+        "○夜勤に入れる看護職がいない日" in m and "1日、2日、3日" in m
+        for m in result.messages
+    )
 
 
 def test_入れる勤務が無い人は黙って全公休にせず報告する(monkeypatch):
@@ -526,7 +584,7 @@ def test_時短を使えない人に時短が選ばれたら知らせる(monkeyp
 
 
 def test_曜日の時間が決まっている人の希望が黙って消えない(monkeypatch):
-    """宮本さんのように曜日ごとに時間が決まっている人に別の記号を選んでも、
+    """曜日ごとに時間が決まっている人に別の記号を選んでも、
     曜日の時間が優先される。反映できないことを必ず知らせる。"""
     monkeypatch.setattr(
         scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
@@ -574,3 +632,46 @@ def test_反映できた希望は知らせに出さない(monkeypatch):
 
     assert result.assignments["part-2"] == {1: "9-16時"}
     assert not any("時間パートさん" in m and ALERT_MARK in m for m in result.messages)
+
+
+def test_組めないときはどの日が足りないか知らせる(monkeypatch):
+    """「組めません」だけでは何を直せばよいか分からない。
+
+    希望休を入れすぎた日を、日付で示す。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+    # 全員がその日を希望休にする → 誰も出られない
+    requests = [
+        StaffRequests(staff_id=p.staff_id, name=p.name, entries={1: "公"})
+        for p in profiles
+    ]
+
+    result = build_schedule(profiles, requests=requests, year=2026, month=9)
+
+    assert not result.ok
+    assert any(
+        "人手が足りない日" in message and "1日" in message for message in result.messages
+    ), result.messages
+
+
+def test_組めない理由が人数でないときはその旨を伝える(monkeypatch):
+    """日ごとの人数は足りているのに組めない場合、見当違いの案内をしない。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _night_pair_staff()
+    by_id = {p.staff_id: p for p in profiles}
+    # ○に必要な2人を同席不可にする → 人数は足りているのに組めない
+    by_id["night-1"].pair_constraints = [
+        PairConstraint(other_staff=by_id["night-2"].name, kind="no_pair_night")
+    ]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert not result.ok
+    assert any("日ごとの人数だけを見ると足りています" in m for m in result.messages), (
+        result.messages
+    )
