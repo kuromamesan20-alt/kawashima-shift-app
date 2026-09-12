@@ -29,11 +29,13 @@ from .shifts import (
     DAILY_REQUIREMENT,
     DAY_SHIFT_CODES,
     EARLY_SHIFTS,
+    HOUR_CHOICES,
     LATE_NIGHT_IN,
     NIGHT_AFTER,
     NIGHT_IN,
     OFF,
     REQUIRED_DAY_SHIFTS,
+    SELF_WRITTEN_MARKS,
 )
 
 # 割り当てうる記号(時間直書きの人を除く)
@@ -126,6 +128,7 @@ def build_schedule(
             solver_profiles.append(profile)
 
     solver_profiles = _move_out_unworkable(solver_profiles, days, result, by_staff_request)
+    _report_unusable_wishes(profiles, solver_profiles, days, result, by_staff_request)
 
     if not solver_profiles:
         result.status = "実行可能"
@@ -713,6 +716,49 @@ def _weekend_penalty(model, x, staff: str, days) -> List:
     return penalties
 
 
+def _report_unusable_wishes(
+    all_profiles, solver_profiles, days, result: "ScheduleResult", by_staff_request
+) -> None:
+    """反映できない希望出勤を、黙って落とさずに知らせる。
+
+    次の2つがある。どちらも記入した本人には分からないので必ず報告する。
+      - 番号のシフトで組む人に、時短の時間が選ばれた
+      - 時間が決まっている人に、その人が入れない記号が選ばれた
+    """
+    solver_ids = {p.staff_id for p in solver_profiles}
+    day_numbers = {day.day for day in days}
+
+    for profile in all_profiles:
+        request = by_staff_request.get(profile.staff_id)
+        if not request or profile.is_on_leave(result.year, result.month):
+            continue
+        wishes = {
+            day: mark
+            for day, mark in request.wish_work_days().items()
+            if day in day_numbers
+        }
+        if not wishes:
+            continue
+
+        if profile.staff_id in solver_ids:
+            unusable = {d: m for d, m in wishes.items() if m in HOUR_CHOICES}
+            advice = "番号のシフトか「日」を選んでください"
+            why = "この方は番号のシフトで組む方なので"
+        else:
+            # 時間をセルに直接書く人。実際に入った内容と突き合わせる。
+            assignment = result.assignments.get(profile.staff_id, {})
+            unusable = {d: m for d, m in wishes.items() if assignment.get(d) != m}
+            advice = "「日」か時短の時間を選んでください"
+            why = "この方は勤務時間が決まっている方なので"
+
+        if unusable:
+            detail = "、".join(f"{d}日「{m}」" for d, m in sorted(unusable.items()))
+            result.messages.append(
+                f"{ALERT_MARK} {profile.name}: {detail} は、{why}そのままは反映できません。"
+                f"{advice}"
+            )
+
+
 # --- 入れる勤務が1つも無い人 ------------------------------------------------------
 
 
@@ -790,7 +836,7 @@ def _fixed_hours_assignment(
 
     hours = f"{profile.work_hours[0]}-{profile.work_hours[1]}" if profile.work_hours else ""
     wish_off = set(request.wish_off_days()) if request else set()
-    wish_work = set(request.wish_work_days()) if request else set()
+    wish_work = request.wish_work_days() if request else {}
     # 有給・夏休・研修・健診。公休とは別に数えるので、公で塗りつぶしてはいけない。
     absences = request.absence_days() if request else {}
 
@@ -802,6 +848,11 @@ def _fixed_hours_assignment(
             assignment[day.day] = OFF
         elif day.weekday in by_weekday:
             assignment[day.day] = "・".join(by_weekday[day.weekday])
+        elif day.day in wish_work and wish_work[day.day] in SELF_WRITTEN_MARKS:
+            # 「日」や時短の「9-16」は、選ばれたものをそのままセルに書く。
+            # 中村さんのように「日勤または時短9-16時、8-15時」と条件にある人は、
+            # その日どれで入るかを希望として選んでもらう。
+            assignment[day.day] = wish_work[day.day]
         elif hours and (
             day.day in wish_work or day.weekday in profile.fixed_work_weekdays
         ):

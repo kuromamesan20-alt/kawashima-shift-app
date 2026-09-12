@@ -20,7 +20,14 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from .calendar_utils import Day, month_days, month_label
 from .models import StaffProfile
-from .shifts import ABSENCE_MARKS, DAY_SHIFTS, LATE_NIGHT_IN, NIGHT_IN, OFF
+from .shifts import (
+    ABSENCE_MARKS,
+    DAY_SHIFTS,
+    HOUR_CHOICES,
+    LATE_NIGHT_IN,
+    NIGHT_IN,
+    OFF,
+)
 
 SHEET_NAME = "希望"
 LEGEND_SHEET = "書き方"
@@ -28,7 +35,11 @@ LEGEND_SHEET = "書き方"
 # セルのプルダウンに出す選択肢。空欄=希望なし。
 WISH_OFF = OFF  # 公 = この日は休みたい
 WISH_CHOICES: Tuple[str, ...] = (
-    (WISH_OFF,) + tuple(DAY_SHIFTS) + (NIGHT_IN, LATE_NIGHT_IN) + ABSENCE_MARKS
+    (WISH_OFF,)
+    + tuple(DAY_SHIFTS)
+    + HOUR_CHOICES  # 時短。番号のシフトに当てはまらない時間帯で働く人用
+    + (NIGHT_IN, LATE_NIGHT_IN)
+    + ABSENCE_MARKS
 )
 
 _ID_COLUMN = 1
@@ -193,6 +204,9 @@ def _write_staff_row(
         cell.value = entries.get(day.day) or None
         cell.border = _BORDER
         cell.alignment = Alignment(horizontal="center", vertical="center")
+        # 文字列として扱わせる。Excelは「9-16」のような値を日付に変換してしまい、
+        # 読み戻したときに希望が消える。
+        cell.number_format = "@"
         if day.is_weekend:
             cell.fill = _WEEKEND_FILL
 
@@ -220,6 +234,10 @@ def _write_legend(workbook: Workbook) -> None:
     rows += [
         (code, f"この日は {times[0]}-{times[1]} の勤務に入りたい")
         for code, times in DAY_SHIFTS.items()
+    ]
+    rows += [
+        (code, f"この日は {code} の時短で入りたい(勤務時間が決まっている方のみ)")
+        for code in HOUR_CHOICES
     ]
     rows += [
         (NIGHT_IN, "この日は夜勤に入りたい（翌日は明け、その次は公休になります）"),

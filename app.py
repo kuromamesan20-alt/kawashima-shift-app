@@ -27,6 +27,7 @@ from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E40
 from kawashima_schedule.shifts import (  # noqa: E402
     ABSENCE_MARKS,
     DAY_SHIFTS,
+    HOUR_CHOICES,
     LATE_NIGHT_IN,
     NIGHT_IN,
     OFF,
@@ -229,11 +230,19 @@ def _pick_month(key: str = "wish"):
 def _show_legend() -> None:
     with st.expander("記号の意味", expanded=False):
         lines = [f"**{code}** {start}-{end} に入りたい" for code, (start, end) in DAY_SHIFTS.items()]
+        lines += [
+            f"**{code}** {code} の時短で入りたい"
+            for code in HOUR_CHOICES
+        ]
         lines += [f"**{mark}** {text}" for mark, text in MEANING.items()]
         lines.append("**(空欄)** 希望なし。こちらで組みます")
         for chunk in [lines[i::3] for i in range(3)]:
             st.markdown("　/　".join(chunk))
         st.caption("夜勤は ○ → △ → 公 の3日、深夜は ◉ → 公 の2日が続きます。")
+        st.caption(
+            f"時短({' / '.join(HOUR_CHOICES)})は、勤務時間が決まっている方のためのものです。"
+            "番号のシフトで組む方に選ぶと、作るときに知らせが出ます。"
+        )
 
 
 def _to_frame(profiles, days, saved) -> pd.DataFrame:

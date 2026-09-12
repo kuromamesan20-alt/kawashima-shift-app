@@ -282,13 +282,41 @@ def test_番号のシフトに合わない勤務時間は時間をそのまま�
         can_late_night=False,
         work_hours=("08:00", "15:00"),
     )
-    wish = StaffRequests(staff_id="part-1", name="時間パートさん", entries={1: "日"})
+    # 「日③」のように本人が入れない番号を選ばれても、勤務時間を書く
+    wish = StaffRequests(staff_id="part-1", name="時間パートさん", entries={1: "日③"})
 
     profiles = _staff_with_night_roles() + [_late_night_filler(), part]
     result = build_schedule(profiles, requests=[wish], year=2026, month=9)
 
     assert result.ok, result.messages
     assert result.assignments["part-1"] == {1: "08:00-15:00"}
+
+
+def test_時短や日勤は選ばれたものをそのまま書く(monkeypatch):
+    """「日勤または時短9-16時、8-15時など」の人は、その日どれで入るか選べる。
+
+    以前は何を選んでも work_hours の1パターンだけが入っていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    base = dict(
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        work_hours=("08:00", "15:00"),
+    )
+    for chosen in ("日", "9-16時", "8-15時"):
+        part = StaffProfile(staff_id="part-1", name="時間パートさん", **base)
+        wish = StaffRequests(
+            staff_id="part-1", name="時間パートさん", entries={1: chosen}
+        )
+        profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+        result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+        assert result.ok, result.messages
+        assert result.assignments["part-1"] == {1: chosen}, f"「{chosen}」が入るはず"
 
 
 def test_時間直書きの人の有給が反映される(monkeypatch):
@@ -479,3 +507,70 @@ def test_散らす要望は絶対厳守にしない(monkeypatch):
     result = build_schedule(profiles, requests=[], year=2026, month=9)
 
     assert result.ok, result.messages
+
+
+def test_時短を使えない人に時短が選ばれたら知らせる(monkeypatch):
+    """番号のシフトで組む人に時短の時間を選ばれても反映できない。黙って落とさない。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+    target = profiles[0]
+    wish = StaffRequests(staff_id=target.staff_id, name=target.name, entries={1: "9-16時"})
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert any(
+        ALERT_MARK in message and target.name in message for message in result.messages
+    ), result.messages
+
+
+def test_曜日の時間が決まっている人の希望が黙って消えない(monkeypatch):
+    """宮本さんのように曜日ごとに時間が決まっている人に別の記号を選んでも、
+    曜日の時間が優先される。反映できないことを必ず知らせる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    part = StaffProfile(
+        staff_id="slot-2",
+        name="曜日パートさん",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        fixed_time_slots=[FixedTimeSlot(weekday=1, start="09:00", end="15:00")],
+    )
+    # 2026-09-01 は火曜(weekday=1)。曜日の時間が入るので、時短の希望は通らない
+    wish = StaffRequests(staff_id="slot-2", name="曜日パートさん", entries={1: "9-16時"})
+
+    profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["slot-2"] == {1: "09:00-15:00"}
+    assert any(
+        ALERT_MARK in m and "曜日パートさん" in m for m in result.messages
+    ), result.messages
+
+
+def test_反映できた希望は知らせに出さない(monkeypatch):
+    """通った希望まで★要確認に出すと、本当に見るべきものが埋もれる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    part = StaffProfile(
+        staff_id="part-2",
+        name="時間パートさん",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        work_hours=("08:00", "15:00"),
+    )
+    wish = StaffRequests(staff_id="part-2", name="時間パートさん", entries={1: "9-16時"})
+
+    profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.assignments["part-2"] == {1: "9-16時"}
+    assert not any("時間パートさん" in m and ALERT_MARK in m for m in result.messages)
