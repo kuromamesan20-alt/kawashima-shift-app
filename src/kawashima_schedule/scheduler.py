@@ -59,6 +59,10 @@ WEIGHT_LAST_RESORT = 300
 # 実物の2026年7月では、看護職の深夜3回はすべて齋藤さんだった。
 NURSES_ALLOWED_ON_LATE_NIGHT = ("齋藤",)
 
+# 見落とすと勤務表がおかしいまま渡ってしまう知らせに付ける印。
+# 画面側はこの印で並べ替えず、必ず目に入る場所に出す。
+ALERT_MARK = "★要確認"
+
 
 @dataclass
 class ScheduleResult:
@@ -114,6 +118,8 @@ def build_schedule(
             result.messages.append(f"{profile.name}: {reason}")
         else:
             solver_profiles.append(profile)
+
+    solver_profiles = _move_out_unworkable(solver_profiles, days, result, by_staff_request)
 
     if not solver_profiles:
         result.status = "実行可能"
@@ -201,40 +207,45 @@ def _add_one_mark_per_day(model, x, profiles, days) -> None:
             model.AddExactlyOne(x[profile.staff_id, day.day, mark] for mark in ALL_MARKS)
 
 
+def allowed_entry_marks(profile, day) -> set:
+    """その人がその日に「入れる」勤務の記号。
+
+    △(夜勤明け)と公(公休)は入りから決まるので含めない。
+    可否の判定はここ1か所に集約する。制約を足す側と事前チェックとで
+    判定が食い違うと、誰も勤務できない人が黙って全公休になってしまう。
+    """
+    marks = set(profile.shifts_allowed_on(day.weekday))
+    if profile.can_night:
+        marks.add(NIGHT_IN)
+    if profile.can_late_night:
+        marks.add(LATE_NIGHT_IN)
+
+    # 夜勤に入る曜日が決まっている人
+    if profile.night_weekdays and day.weekday not in profile.night_weekdays:
+        marks.discard(NIGHT_IN)
+
+    # 勤務形態の限定。
+    # 「深夜勤務のみ」と「夜勤専従」が両方書かれている人がいる(原文の言い回しの重なり)。
+    # その場合は、より具体的な「深夜勤務のみ」を採る。実物の2026年7月でも
+    # この人は ◉ だけで、○ は1回も無かった。
+    if profile.late_night_only:
+        marks &= {LATE_NIGHT_IN}
+    elif profile.night_shift_exclusive:
+        marks &= {NIGHT_IN}
+    elif profile.day_shift_only:
+        marks -= {NIGHT_IN, LATE_NIGHT_IN}
+    return marks
+
+
 def _add_availability(model, x, profiles, days) -> None:
     """入れない勤務を禁止する。"""
+    entry_marks = tuple(DAY_SHIFT_CODES) + (NIGHT_IN, LATE_NIGHT_IN)
     for profile in profiles:
         for day in days:
-            # 曜日限定の制限も反映する
-            allowed = set(profile.shifts_allowed_on(day.weekday))
-            for code in DAY_SHIFT_CODES:
-                if code not in allowed:
-                    model.Add(x[profile.staff_id, day.day, code] == 0)
-
-            if not profile.can_night:
-                model.Add(x[profile.staff_id, day.day, NIGHT_IN] == 0)
-            if not profile.can_late_night:
-                model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
-
-            # 夜勤に入る曜日が決まっている人
-            if profile.night_weekdays and day.weekday not in profile.night_weekdays:
-                model.Add(x[profile.staff_id, day.day, NIGHT_IN] == 0)
-
-        # 勤務形態の限定
-        if profile.night_shift_exclusive:
-            for day in days:
-                for code in DAY_SHIFT_CODES:
-                    model.Add(x[profile.staff_id, day.day, code] == 0)
-                model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
-        if profile.late_night_only:
-            for day in days:
-                for code in DAY_SHIFT_CODES:
-                    model.Add(x[profile.staff_id, day.day, code] == 0)
-                model.Add(x[profile.staff_id, day.day, NIGHT_IN] == 0)
-        if profile.day_shift_only:
-            for day in days:
-                model.Add(x[profile.staff_id, day.day, NIGHT_IN] == 0)
-                model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
+            allowed = allowed_entry_marks(profile, day)
+            for mark in entry_marks:
+                if mark not in allowed:
+                    model.Add(x[profile.staff_id, day.day, mark] == 0)
 
 
 def _add_night_sequences(model, x, profiles, days) -> None:
@@ -625,24 +636,99 @@ def _weekend_penalty(model, x, staff: str, days) -> List:
     return penalties
 
 
+# --- 入れる勤務が1つも無い人 ------------------------------------------------------
+
+
+def _move_out_unworkable(
+    profiles: List[StaffProfile],
+    days: Sequence[Day],
+    result: "ScheduleResult",
+    by_staff_request,
+) -> List[StaffProfile]:
+    """その月に入れる勤務が1つも無い人を、ソルバーから外して必ず報告する。
+
+    そのままソルバーに入れると全部公休になるだけで、何も知らせずに
+    「1か月まるごと休み」の勤務表が出てしまう。条件の書き方が矛盾していても
+    気づけないので、ここで必ず messages に出す。
+    """
+    remaining: List[StaffProfile] = []
+    for profile in profiles:
+        if any(allowed_entry_marks(profile, day) for day in days):
+            remaining.append(profile)
+            continue
+
+        result.assignments[profile.staff_id] = _fixed_hours_assignment(
+            profile, days, by_staff_request.get(profile.staff_id)
+        )
+        # 有給・夏休・研修・健診は「実際に勤務した日」ではないので、
+        # 公休と同様に worked から除く。これらだけ入っている月を
+        # 「勤務できている」と誤判定すると、公休だらけの月を見逃してしまう。
+        worked = sum(
+            1
+            for mark in result.assignments[profile.staff_id].values()
+            if mark != OFF and mark not in ABSENCE_MARKS
+        )
+        absence = sum(
+            1
+            for mark in result.assignments[profile.staff_id].values()
+            if mark in ABSENCE_MARKS
+        )
+        if profile.work_hours and worked:
+            absence_note = f"・有休など{absence}日" if absence else ""
+            result.messages.append(
+                f"{profile.name}: 番号のシフトに当てはまる時間帯が無いため、"
+                f"勤務時間({profile.work_hours[0]}-{profile.work_hours[1]})を"
+                f"そのまま入れました(勤務{worked}日{absence_note})"
+            )
+        elif profile.work_hours:
+            result.messages.append(
+                f"{ALERT_MARK} {profile.name}: 勤務時間"
+                f"({profile.work_hours[0]}-{profile.work_hours[1]})が"
+                "番号のシフトに当てはまらず、希望出勤も入っていないため、"
+                "1か月すべて公休になっています。希望出勤を入れてください"
+            )
+        else:
+            result.messages.append(
+                f"{ALERT_MARK} {profile.name}: 条件からは入れる勤務が1つも無く、"
+                "1か月すべて公休になっています。勤務条件を見直してください"
+            )
+    return remaining
+
+
 # --- 時間直書きの人 --------------------------------------------------------------
 
 
 def _fixed_hours_assignment(
     profile: StaffProfile, days: Sequence[Day], request: Optional[StaffRequests]
 ) -> Dict[int, str]:
-    """曜日ごとに勤務時間が決まっている人の割り当てを、そのまま作る。"""
+    """勤務時間をセルに直接書く人の割り当てを、そのまま作る。
+
+    曜日ごとに時間が決まっている人はその曜日に入れる。
+    曜日は決まっておらず勤務時間だけ決まっている人(「出勤可能な日を希望します」の
+    パート)は、希望出勤として挙がった日にだけ入れる。挙がっていなければ公休。
+    """
     by_weekday: Dict[int, List[str]] = {}
     for slot in profile.fixed_time_slots:
         by_weekday.setdefault(slot.weekday, []).append(f"{slot.start}-{slot.end}")
 
+    hours = f"{profile.work_hours[0]}-{profile.work_hours[1]}" if profile.work_hours else ""
     wish_off = set(request.wish_off_days()) if request else set()
+    wish_work = set(request.wish_work_days()) if request else set()
+    # 有給・夏休・研修・健診。公休とは別に数えるので、公で塗りつぶしてはいけない。
+    absences = request.absence_days() if request else {}
+
     assignment: Dict[int, str] = {}
     for day in days:
-        if day.day in wish_off or day.weekday in profile.fixed_off_weekdays:
+        if day.day in absences:
+            assignment[day.day] = absences[day.day]
+        elif day.day in wish_off or day.weekday in profile.fixed_off_weekdays:
             assignment[day.day] = OFF
         elif day.weekday in by_weekday:
             assignment[day.day] = "・".join(by_weekday[day.weekday])
+        elif hours and (
+            day.day in wish_work or day.weekday in profile.fixed_work_weekdays
+        ):
+            assignment[day.day] = hours
         else:
             assignment[day.day] = OFF
     return assignment

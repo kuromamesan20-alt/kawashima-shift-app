@@ -14,9 +14,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kawashima_schedule import scheduler as scheduler_module  # noqa: E402
 from kawashima_schedule.calendar_utils import Day  # noqa: E402
-from kawashima_schedule.models import StaffProfile  # noqa: E402
-from kawashima_schedule.scheduler import build_schedule  # noqa: E402
-from kawashima_schedule.shifts import OFF, REQUIRED_DAY_SHIFTS  # noqa: E402
+from kawashima_schedule.models import FixedTimeSlot, StaffProfile  # noqa: E402
+from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E402
+from kawashima_schedule.request_sheet import StaffRequests  # noqa: E402
+from kawashima_schedule.shifts import (  # noqa: E402
+    LATE_NIGHT_IN,
+    OFF,
+    REQUIRED_DAY_SHIFTS,
+)
 
 
 def _coverage_staff() -> List[StaffProfile]:
@@ -174,3 +179,160 @@ def test_max_consecutive_days_is_five():
     from kawashima_schedule.shifts import MAX_CONSECUTIVE_WORK_DAYS
 
     assert MAX_CONSECUTIVE_WORK_DAYS == 5
+
+
+# --- 入れる勤務が1つも無い人(実データで見つかった不具合) --------------------------
+
+
+def _staff_with_night_roles() -> List[StaffProfile]:
+    """夜勤の顔ぶれ(看護1+介護1)を満たせる最小構成。深夜の枠は空けてある。
+
+    介護職を1人でも足すと「○に介護職ちょうど1人」の条件が効くので、
+    役割を設定しないままだと組めなくなる。
+    """
+    staff = [p for p in _coverage_staff() if p.staff_id != "latenight-1"]
+    by_id = {p.staff_id: p for p in staff}
+    by_id["night-1"].role = "看護師"
+    by_id["night-2"].role = "介護士"
+    return staff
+
+
+def _late_night_filler() -> StaffProfile:
+    """深夜(◉)の枠を埋めるだけの介護職。"""
+    return StaffProfile(
+        staff_id="latenight-fill",
+        name="深夜要員",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=True,
+    )
+
+
+def test_深夜のみと夜勤専従が両方立っていても深夜に入れる(monkeypatch):
+    """原文の言い回しが重なって両方立つことがある。より具体的な「深夜のみ」を採る。
+
+    以前はこの組み合わせで日勤も夜勤も深夜も全部禁止され、
+    何の警告も出ないまま1か月まるごと公休になっていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    both = StaffProfile(
+        staff_id="both-1",
+        name="深夜専従さん",
+        role="介護士",
+        night_shift_exclusive=True,
+        late_night_only=True,
+    )
+    # 深夜の枠を this 人に取らせるため、既定の深夜要員は外す
+    profiles = _staff_with_night_roles() + [both]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["both-1"] == {1: LATE_NIGHT_IN}
+
+
+def test_入れる勤務が無い人は黙って全公休にせず報告する(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    nobody = StaffProfile(
+        staff_id="none-1",
+        name="入れない人",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+    )
+    profiles = _staff_with_night_roles() + [_late_night_filler(), nobody]
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["none-1"] == {1: OFF}
+    assert any("★要確認" in m and "入れない人" in m for m in result.messages)
+
+
+def test_番号のシフトに合わない勤務時間は時間をそのまま書く(monkeypatch):
+    """8:00-15:00 のような、番号のシフトに当てはまらないパートの勤務時間。
+
+    以前は入れる日勤帯が空になり、警告も無いまま1か月すべて公休になっていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    part = StaffProfile(
+        staff_id="part-1",
+        name="時間パートさん",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        work_hours=("08:00", "15:00"),
+    )
+    wish = StaffRequests(staff_id="part-1", name="時間パートさん", entries={1: "日"})
+
+    profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["part-1"] == {1: "08:00-15:00"}
+
+
+def test_時間直書きの人の有給が反映される(monkeypatch):
+    """有給は公休と別に数えるので、勤務や公で塗りつぶしてはいけない。
+
+    以前は fixed_time_slots のある人に「有」を出しても勤務時間が入っていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    part = StaffProfile(
+        staff_id="slot-1",
+        name="曜日パートさん",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        fixed_time_slots=[FixedTimeSlot(weekday=1, start="09:00", end="13:00")],
+    )
+    wish = StaffRequests(staff_id="slot-1", name="曜日パートさん", entries={1: "有"})
+
+    profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["slot-1"] == {1: "有"}
+
+
+def test_希望出勤が無く有給だけの人は勤務0日として要確認になる(monkeypatch):
+    """有給・夏休などは「勤務した日」に数えてはいけない。
+
+    以前は worked を `mark != OFF` だけで数えていたため、希望出勤が1件も無く
+    有給が入っているだけの月でも worked>0 になり、要確認(★)の警告が出ないまま
+    「勤務時間をそのまま入れました」という誤った安心メッセージになっていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    part = StaffProfile(
+        staff_id="paid-1",
+        name="有給だけさん",
+        role="介護士",
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+        work_hours=("08:00", "15:00"),
+    )
+    # 希望出勤は無く、有給だけが入っている
+    wish = StaffRequests(staff_id="paid-1", name="有給だけさん", entries={1: "有"})
+
+    profiles = _staff_with_night_roles() + [_late_night_filler(), part]
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["paid-1"] == {1: "有"}
+    # 有給は「勤務した日」ではないので、勤務0日として要確認に回る
+    assert any(ALERT_MARK in m and "有給だけさん" in m for m in result.messages)
+    assert not any("そのまま入れました" in m and "有給だけさん" in m for m in result.messages)
