@@ -23,7 +23,7 @@ from kawashima_schedule.profile_store import load_profiles  # noqa: E402
 from kawashima_schedule.request_sheet import WISH_CHOICES, StaffRequests  # noqa: E402
 from kawashima_schedule.request_storage import get_storage  # noqa: E402
 from kawashima_schedule.excel_export import export_schedule  # noqa: E402
-from kawashima_schedule.scheduler import build_schedule  # noqa: E402
+from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E402
 from kawashima_schedule.shifts import (  # noqa: E402
     ABSENCE_MARKS,
     DAY_SHIFTS,
@@ -159,9 +159,17 @@ def _build_page() -> None:
         f"できました（{result.status}） … {len(result.assignments)} 名 / "
         f"責任者「せ」{len(result.responsible)} 日"
     )
-    with st.expander("組んだときのメモ", expanded=False):
-        for message in result.messages:
-            st.write(f"- {message}")
+
+    # 「★要確認」は見落とすと1か月まるごと休みの人が出たまま渡ってしまう。
+    # 折りたたみの中に入れず、そのまま画面に出す。
+    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
+    notes = [m for m in result.messages if not m.startswith(ALERT_MARK)]
+    for message in alerts:
+        st.warning(message.removeprefix(ALERT_MARK).strip())
+    if notes:
+        with st.expander("組んだときのメモ", expanded=False):
+            for message in notes:
+                st.write(f"- {message}")
 
     st.download_button(
         "Excelをダウンロード",
