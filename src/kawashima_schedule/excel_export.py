@@ -20,12 +20,15 @@ from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from .calendar_utils import month_label
 from .models import StaffProfile
 from .scheduler import ScheduleResult
 from .shifts import (
+    ABSENCE_MARKS,
     DAY_SHIFTS,
+    HOUR_CHOICES,
     HEALTH_CHECK,
     LATE_NIGHT_IN,
     NIGHT_AFTER,
@@ -64,6 +67,18 @@ SUMMARY_MARKS: Dict[str, tuple] = {
     "出研": (TRAINING, HEALTH_CHECK),
 }
 UNIT_ORDER = ("ばら", "さくら", "ゆり", "すみれ")
+
+# 手直しするときにセルのプルダウンに出す記号。
+# ◉ や 丸数字 は手で打ちにくく、○ は似た字(◯ 〇)と取り違えやすい。
+# 見た目が同じでも別の文字だと集計の式が拾わないので、選べるようにする。
+# ただし入力を禁止はしない(_add_mark_dropdown を参照)。
+EDIT_CHOICES = (
+    (OFF,)
+    + tuple(DAY_SHIFTS)
+    + HOUR_CHOICES
+    + (NIGHT_IN, NIGHT_AFTER, LATE_NIGHT_IN)
+    + ABSENCE_MARKS
+)
 
 _HEAD_FILL = PatternFill("solid", fgColor="2F5D8C")
 _WEEKEND_FILL = PatternFill("solid", fgColor="FDECEC")
@@ -115,6 +130,11 @@ def export_schedule(
 
     staff_rows = (FIRST_STAFF_ROW, max(FIRST_STAFF_ROW, row - 1))
     _write_daily_check(sheet, row + 1, days, staff_rows)
+    _add_mark_dropdown(
+        sheet,
+        [FIRST_STAFF_ROW + index * 2 for index in range(len(ordered))],
+        len(days),
+    )
     _finish_layout(sheet, days, len(ordered))
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,6 +379,41 @@ def _mark_shortage(sheet, judge_row: int, day_count: int) -> None:
         f"{first}{judge_row}:{last}{judge_row}",
         CellIsRule(operator="equal", formula=['"×"'], fill=_NG_FILL),
     )
+
+
+def _add_mark_dropdown(sheet, staff_rows, day_count: int) -> None:
+    """勤務欄のセルに、記号を選ぶプルダウンを付ける。
+
+    手直しするときに ◉ や 丸数字 を打つ手間をなくし、
+    ○ と ◯ の取り違えで集計が合わなくなるのを防ぐ。
+
+    一覧に無いものを打ってもエラーにしない(showErrorMessage=False)。
+    勤務時間を直接書く方のセルには「15」「19-20」などが入るうえ、
+    こちらが想定しない直し方をされることもあるため、入力は禁止しない。
+
+    付けるのは1人につき1行目の勤務欄だけ。2行目は中抜けと「せ」の欄で
+    用途が違い、右端と最下部は計算式なので付けない。
+    """
+    if not staff_rows or not day_count:
+        return
+
+    # 記号はカンマで区切って並べる。カンマを含む記号は足さないこと。
+    options = f'"{",".join(EDIT_CHOICES)}"'
+    if len(options) > 255:  # Excelの上限。前後の " も数に入る。超えると壊れる
+        return
+
+    validation = DataValidation(
+        type="list",
+        formula1=options,
+        allow_blank=True,
+        showErrorMessage=False,
+    )
+    sheet.add_data_validation(validation)
+
+    first = get_column_letter(FIRST_DAY_COLUMN)
+    last = get_column_letter(FIRST_DAY_COLUMN + day_count - 1)
+    for row in staff_rows:
+        validation.add(f"{first}{row}:{last}{row}")
 
 
 def _finish_layout(sheet, days, staff_count: int) -> None:

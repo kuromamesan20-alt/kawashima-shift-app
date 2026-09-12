@@ -227,3 +227,77 @@ def test_そろっているかの判定も式で入る(tmp_path):
             assert '"○","×"' in value
             return
     raise AssertionError("判定行が見つからない")
+
+
+# --- 手直し用のプルダウン ---------------------------------------------------------
+
+
+def test_勤務欄にプルダウンが付く(tmp_path):
+    """◉ や 丸数字 は打ちにくく、○ は似た字と取り違えやすい。"""
+    from openpyxl.utils import range_boundaries
+
+    from kawashima_schedule.excel_export import EDIT_CHOICES
+
+    sheet = _build_sheet(tmp_path)
+    validations = sheet.data_validations.dataValidation
+    assert len(validations) == 1, "プルダウンは1つにまとめる"
+
+    validation = validations[0]
+    for mark in ("○", "△", "◉", "公", "日①", "有"):
+        assert mark in validation.formula1, f"{mark} が選択肢に無い"
+
+    ranges = str(validation.sqref).split()
+    assert len(ranges) == 2, "スタッフ2名ぶんの行に付く"
+    for rg in ranges:
+        left, top, right, bottom = range_boundaries(rg)
+        assert top == bottom, "1行ずつ付ける"
+        assert top % 2 == 0, "1人2行のうち1行目(偶数行)だけ"
+
+
+def test_プルダウン以外の入力も許す(tmp_path):
+    """時間を直接書く方のセルには「15」「19-20」なども入る。
+
+    入力を禁止すると、こちらが想定しない直し方ができなくなる。
+    """
+    sheet = _build_sheet(tmp_path)
+    validation = sheet.data_validations.dataValidation[0]
+    assert validation.showErrorMessage is False
+    assert validation.allow_blank is True
+
+
+def test_集計欄と2行目にはプルダウンを付けない(tmp_path):
+    from openpyxl.utils import range_boundaries
+
+    from kawashima_schedule.excel_export import FIRST_DAY_COLUMN, FIRST_STAFF_ROW
+
+    sheet = _build_sheet(tmp_path)
+    covered = set()
+    for validation in sheet.data_validations.dataValidation:
+        for rg in str(validation.sqref).split():
+            left, top, right, bottom = range_boundaries(rg)
+            for row in range(top, bottom + 1):
+                for column in range(left, right + 1):
+                    covered.add((row, column))
+
+    # 2行目(中抜け・せ の欄)
+    assert not any(
+        (FIRST_STAFF_ROW + 1, column) in covered
+        for column in range(FIRST_DAY_COLUMN, FIRST_DAY_COLUMN + 5)
+    )
+    # 右端の集計欄(計算式)
+    assert not any(
+        (FIRST_STAFF_ROW, FIRST_DAY_COLUMN + 5 + offset) in covered
+        for offset in range(len(SUMMARY))
+    )
+
+
+def test_選択肢が長すぎればプルダウンを付けない(monkeypatch, tmp_path):
+    """Excelの上限(255文字)を超えるとファイルが壊れる。付けない方を選ぶ。"""
+    from kawashima_schedule import excel_export
+
+    monkeypatch.setattr(excel_export, "EDIT_CHOICES", tuple(f"記号{i:03d}" for i in range(60)))
+    sheet = _build_sheet(tmp_path)
+
+    assert len(sheet.data_validations.dataValidation) == 0
+    # 勤務表そのものは書き出せていること
+    assert sheet.cell(row=6, column=5).value == "日①"
