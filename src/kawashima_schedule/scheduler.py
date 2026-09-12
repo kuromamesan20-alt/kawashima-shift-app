@@ -25,6 +25,7 @@ from .models import StaffProfile
 from .request_sheet import StaffRequests
 from .shifts import (
     ABSENCE_MARKS,
+    MAX_CONSECUTIVE_WORK_DAYS,
     DAILY_REQUIREMENT,
     DAY_SHIFT_CODES,
     EARLY_SHIFTS,
@@ -125,6 +126,7 @@ def build_schedule(
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
+    _add_max_consecutive_work(model, x, solver_profiles, days)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
     se = _add_responsible(model, x, solver_profiles, days, result)
 
@@ -343,7 +345,7 @@ def _add_weekly_days_off(model, x, profiles, days, by_staff_request) -> None:
     「週◯日勤務」と決まっているパート職員は、休みの数え方が違うので対象にしない。
     """
     for profile in profiles:
-        if profile.writes_own_hours or profile.is_support_staff:
+        if _has_own_schedule(profile):
             continue
         # 週5日勤務なら休みは2日。それ以外は 7 - 週の勤務日数。
         weekly_work = profile.weekly_work_days or 5
@@ -372,6 +374,42 @@ def _weeks(days):
     if current:
         weeks.append(current)
     return weeks
+
+
+def _has_own_schedule(profile) -> bool:
+    """勤務の形が個別に決まっていて、週休2日や連続勤務の上限を当てはめない人か。
+
+    対象は「曜日ごとに勤務時間が決まっているパート」と「介護補助」。
+    work_hours(全日共通の時間枠)だけの人は、番号シフトで普通に働く常勤なので
+    含めない。ここを writes_own_hours で判定すると、条件文に
+    「6時から17時迄の枠」と書かれた常勤まで外れてしまう。
+    """
+    return bool(profile.fixed_time_slots or profile.is_support_staff)
+
+
+def _add_max_consecutive_work(model, x, profiles, days) -> None:
+    """連続勤務を5日までにする。
+
+    6日ぶんのどの並びを見ても、必ず1日は休みが入るようにする。
+    休みとは「公」と、有給・夏休・研修・健診のこと。
+    夜勤明け(△)は勤務が続いているものとして数える(実物がそうなっている)。
+    """
+    rest_marks = (OFF,) + ABSENCE_MARKS
+    window = MAX_CONSECUTIVE_WORK_DAYS + 1
+
+    for profile in profiles:
+        if _has_own_schedule(profile):
+            continue
+        for start in range(len(days) - window + 1):
+            chunk = days[start : start + window]
+            model.Add(
+                sum(
+                    x[profile.staff_id, day.day, mark]
+                    for day in chunk
+                    for mark in rest_marks
+                )
+                >= 1
+            )
 
 
 def _add_monthly_off_quota(model, x, profiles, days) -> None:

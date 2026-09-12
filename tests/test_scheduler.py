@@ -139,3 +139,38 @@ def test_only_named_nurses_take_late_night():
 
     assert NURSES_ALLOWED_ON_LATE_NIGHT, "誰も指定が無いと看護職が深夜に入れない"
     assert "齋藤" in NURSES_ALLOWED_ON_LATE_NIGHT
+
+
+def test_staff_with_a_time_window_still_follows_the_limits():
+    """「6時から17時の枠」のような時間指定があっても、常勤は上限の対象。
+
+    ここを writes_own_hours で判定すると、番号シフトで普通に働く常勤まで
+    連続勤務や週休2日の対象から外れてしまう(実際に13日連続が出た)。
+    """
+    from kawashima_schedule.models import FixedTimeSlot, StaffProfile
+    from kawashima_schedule.scheduler import _has_own_schedule
+
+    # 条件文に時間の枠が書かれた常勤 → 対象に含める
+    nurse = StaffProfile(
+        staff_id="n1", name="常勤看護", role="看護師", work_hours=("06:00", "17:00")
+    )
+    assert nurse.writes_own_hours, "時間枠は持っている"
+    assert not _has_own_schedule(nurse), "それでも上限の対象に含める"
+
+    # 曜日ごとに勤務時間が決まっているパート → 対象外
+    part = StaffProfile(
+        staff_id="p1",
+        name="パート",
+        fixed_time_slots=[FixedTimeSlot(weekday=1, start="09:00", end="15:00")],
+    )
+    assert _has_own_schedule(part)
+
+    # 介護補助 → 対象外
+    support = StaffProfile(staff_id="s1", name="補助", is_support_staff=True)
+    assert _has_own_schedule(support)
+
+
+def test_max_consecutive_days_is_five():
+    from kawashima_schedule.shifts import MAX_CONSECUTIVE_WORK_DAYS
+
+    assert MAX_CONSECUTIVE_WORK_DAYS == 5
