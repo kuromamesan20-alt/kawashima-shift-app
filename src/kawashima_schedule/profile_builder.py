@@ -16,12 +16,33 @@ _QUALIFICATION_SPLIT = re.compile(r"[、,／/・\n]+")
 def build_profiles(rows: Sequence[Dict[str, str]]) -> List[StaffProfile]:
     """CSVの全行から、自由文を解釈済みの StaffProfile 一覧を作る。"""
     roster = [row.get("name", "") for row in rows]
-    parser = ConditionParser(roster)
+    # 条件文の中では「スタッフW」のような仮名でスタッフが指されている。
+    # 苗字に切り替えた後もこの書き方は残っているので、対応表を渡して解決する。
+    aliases: Dict[str, str] = {}
+    collisions: Dict[str, List[str]] = {}
+    for row in rows:
+        alias, display = row.get("alias", ""), row.get("name", "")
+        if not alias or not display or alias == display:
+            continue
+        if alias in aliases and aliases[alias] != display:
+            # 同じ仮名が2人に付いていると、同席制約の相手を取り違える。
+            # 黙って後勝ちにせず、両方の苗字を控えて後で確認に回す。
+            collisions.setdefault(alias, [aliases[alias]]).append(display)
+            continue
+        aliases[alias] = display
+    parser = ConditionParser(roster, aliases)
 
     profiles: List[StaffProfile] = []
     for row in rows:
         profile = _base_profile(row)
         parser.apply(profile)
+        for alias, names in collisions.items():
+            profile.flag_review(
+                f"仮名「{alias}」が複数の方({'、'.join(names)})に付いています。"
+                "条件文でこの仮名が使われていると、同席の相手を取り違えます",
+                code="alias_collision",
+                label=f"alias/{alias}",
+            )
         _apply_early_late_columns(profile, row)
         _cross_check(profile)
         profiles.append(profile)

@@ -451,9 +451,11 @@ def _add_monthly_off_quota(model, x, profiles, days) -> None:
 
 
 def _add_pair_constraints(model, x, profiles, days) -> List:
-    """同席(同じ夜の ○ と ◉)の制約。絶対厳守。
+    """同席(同じ夜に2人とも夜間の勤務)の制約。絶対厳守。
 
-    ついでに「同じ相手と何度も組まない」ためのペナルティ項も作って返す。
+    戻り値のペナルティ項は今は常に空。
+    「同じナースが複数回同席しないように」という相手を特定しない要望が
+    未実装のため、その受け口として残してある(確認事項には出している)。
     """
     by_name = {profile.name: profile for profile in profiles}
     penalties: List = []
@@ -467,16 +469,20 @@ def _add_pair_constraints(model, x, profiles, days) -> List:
             together = []
             for day in days:
                 both = model.NewBoolVar(f"pair_{profile.staff_id}_{other.staff_id}_{day.day}")
-                # どちらが夜勤でどちらが深夜でも「同席」とみなす
-                a_night = x[profile.staff_id, day.day, NIGHT_IN]
-                a_late = x[profile.staff_id, day.day, LATE_NIGHT_IN]
-                b_night = x[other.staff_id, day.day, NIGHT_IN]
-                b_late = x[other.staff_id, day.day, LATE_NIGHT_IN]
-
-                model.Add(both >= a_night + b_late - 1)
-                model.Add(both >= a_late + b_night - 1)
-                model.Add(both <= a_night + a_late)
-                model.Add(both <= b_night + b_late)
+                # 同じ夜に2人とも夜間の勤務に入っていれば「同席」。
+                # ○が毎晩2人いるので、○と○の組み合わせも同席になる。
+                # 施設の担当者も「夜勤(深夜含む)」と言っており、○◉の別は問わない。
+                a_on = (
+                    x[profile.staff_id, day.day, NIGHT_IN]
+                    + x[profile.staff_id, day.day, LATE_NIGHT_IN]
+                )
+                b_on = (
+                    x[other.staff_id, day.day, NIGHT_IN]
+                    + x[other.staff_id, day.day, LATE_NIGHT_IN]
+                )
+                model.Add(both >= a_on + b_on - 1)
+                model.Add(both <= a_on)
+                model.Add(both <= b_on)
                 together.append(both)
 
             if constraint.kind == "no_pair_night":

@@ -14,7 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kawashima_schedule import scheduler as scheduler_module  # noqa: E402
 from kawashima_schedule.calendar_utils import Day  # noqa: E402
-from kawashima_schedule.models import FixedTimeSlot, StaffProfile  # noqa: E402
+from kawashima_schedule.models import (  # noqa: E402
+    FixedTimeSlot,
+    PairConstraint,
+    StaffProfile,
+)
 from kawashima_schedule.scheduler import (  # noqa: E402
     ALERT_MARK,
     allowed_entry_marks,
@@ -368,3 +372,58 @@ def test_夜勤専従は深夜にも入れる(monkeypatch):
 
     assert result.ok, result.messages
     assert result.assignments["ex-1"] == {1: LATE_NIGHT_IN}
+
+
+# --- 同席制約(実データで効いていなかった) ----------------------------------------
+
+
+def _night_pair_staff() -> List[StaffProfile]:
+    """○2人(看護1+介護1)と◉1人をちょうど満たす、日勤帯なしの最小構成。"""
+    staff = [p for p in _coverage_staff() if p.staff_id != "latenight-1"]
+    by_id = {p.staff_id: p for p in staff}
+    by_id["night-1"].role = "看護師"
+    by_id["night-2"].role = "介護士"
+    return staff + [_late_night_filler()]
+
+
+def test_同じ夜に2人とも夜勤なら同席として数える(monkeypatch):
+    """○は毎晩2人いるので、○と○の組み合わせも同席になる。
+
+    以前は○と◉の組み合わせしか数えておらず、看護師と介護士の
+    「同席不可」が素通りしていた。実データでは実際に同席が発生していた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _night_pair_staff()
+    by_id = {p.staff_id: p for p in profiles}
+    by_id["night-1"].pair_constraints = [
+        PairConstraint(other_staff=by_id["night-2"].name, kind="no_pair_night")
+    ]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    # ○は看護1+介護1で2人必要なのに、その2人が同席不可 → 組めないのが正しい
+    assert not result.ok, (
+        "○と○の同席を数えていれば、この条件では組めないはず。"
+        f"組めてしまった: {result.assignments}"
+    )
+
+
+def test_同席の回数上限が守られる(monkeypatch):
+    """「月1回まで」なら、同じ夜に入るのは1回まで。"""
+    days = [Day(date(2026, 9, day)) for day in (1, 2, 3)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _night_pair_staff()
+    by_id = {p.staff_id: p for p in profiles}
+    by_id["night-1"].pair_constraints = [
+        PairConstraint(
+            other_staff=by_id["night-2"].name, kind="max_shared_night", max_count=1
+        )
+    ]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    # ○は毎日この2人しかいないので、3日とも同席になり上限1回を超える
+    assert not result.ok, "同席の上限を数えていれば組めないはず"

@@ -88,9 +88,26 @@ _SHIFT_ABILITY_LIST_RE = re.compile(
 class ConditionParser:
     """スタッフ名簿を踏まえて自由文を解釈する。"""
 
-    def __init__(self, roster: Sequence[str]):
-        # 同席相手の照合に使う。長い名前を先に試すため長さ降順で持つ。
-        self._roster = sorted({normalize(n) for n in roster}, key=len, reverse=True)
+    def __init__(self, roster: Sequence[str], aliases: Optional[Dict[str, str]] = None):
+        """roster は表示名(苗字)の一覧。aliases は条件文で使われる別名との対応。
+
+        条件文の中では「スタッフW」のような仮名でスタッフが指されている。
+        表示名を苗字に切り替えた後もこの書き方が残っているため、
+        照合は「表示名 + 別名」の両方で行い、見つかった相手は必ず表示名で返す。
+        """
+        lookup: Dict[str, str] = {}
+        for name in roster:
+            key = normalize(name)
+            if key:
+                lookup[key] = key
+        for alias, display in (aliases or {}).items():
+            key = normalize(alias)
+            display_key = normalize(display)
+            if key and display_key:
+                lookup.setdefault(key, display_key)
+        self._lookup = lookup
+        # 長い名前を先に試すため長さ降順で持つ。
+        self._roster = sorted(lookup, key=len, reverse=True)
         self._explicit_late_night = False
 
     # -- 公開API ---------------------------------------------------------------
@@ -598,17 +615,24 @@ class ConditionParser:
         return created
 
     def _find_staff_names(self, sentence: str, exclude: str) -> List[str]:
-        """名簿と突き合わせて、文中のスタッフ名を拾う。"""
+        """名簿と突き合わせて、文中のスタッフ名を拾う。返すのは表示名(苗字)。"""
         text = normalize(sentence)
         exclude_norm = normalize(exclude)
         found: List[str] = []
 
+        def add(token: str) -> None:
+            display = self._lookup.get(token)
+            if display and display != exclude_norm and display not in found:
+                found.append(display)
+
         for name in self._roster:
-            if name == exclude_norm:
+            if name not in text:
                 continue
-            if name in text:
-                found.append(name)
-                text = text.replace(name, "＿" * len(name))
+            # 自分の名前も潰しておく。残すと、その一部が他の人の名前として
+            # 拾われることがある。
+            if self._lookup.get(name) != exclude_norm:
+                add(name)
+            text = text.replace(name, "＿" * len(name))
 
         # 「スタッフEとW」のように2人目が接頭辞なしで書かれるケースを拾う。
         # 「ところに」「ないときは」のような普通の日本語を人名と誤認しないよう、
@@ -616,9 +640,7 @@ class ConditionParser:
         if not found:
             return found
         for match in _STAFF_TOKEN_RE.finditer(text):
-            candidate = normalize(f"スタッフ{match.group(1)}")
-            if candidate != exclude_norm and candidate in self._roster and candidate not in found:
-                found.append(candidate)
+            add(normalize(f"スタッフ{match.group(1)}"))
         return found
 
 

@@ -54,9 +54,11 @@ ABSENCE_MARKS: Tuple[str, ...] = (PAID_LEAVE, SUMMER_LEAVE, TRAINING, HEALTH_CHE
 NIGHT_SEQUENCE = (NIGHT_IN, NIGHT_AFTER, OFF)
 LATE_NIGHT_SEQUENCE = (LATE_NIGHT_IN, OFF)
 
-# 「同席」とは、同じ夜の ○(夜勤) の人と ◉(深夜) の人の組み合わせのこと。
-# 夜間は ○ が1人・◉ が1人なので、その2人が毎晩ペアになる。
-# 「同席不可」は、この2人の組み合わせにしてはいけない、という意味。
+# 「同席」とは、同じ夜に2人とも夜間の勤務に入っていること。
+# 夜間は ○ が2人・◉ が1人の計3人なので、○と○、○と◉のどちらも同席になる。
+# 施設の担当者も「夜勤(深夜含む)」という言い方をしており、○◉の別は問わない。
+# 「同席不可」は、その2人を同じ夜に入れてはいけない、という意味。
+# 「◯回まで」なら、同じ夜に入る回数がその月に何回までか。
 # 「同じナースが複数回同席しないように」は、同じ組み合わせを繰り返さないこと。
 
 ALL_MARKS: List[str] = DAY_SHIFT_CODES + [NIGHT_IN, NIGHT_AFTER, LATE_NIGHT_IN, OFF]

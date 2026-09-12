@@ -80,8 +80,12 @@ def load_staff_rows(csv_path: Path) -> List[Dict[str, str]]:
         if _is_test_row(row):
             continue
 
-        # 表示名は苗字を優先する。元の値は display_source として残しておく。
+        # 表示名は苗字を優先する。
+        # 「名前」列の値(「スタッフW」のような仮名)は、条件文の中でスタッフを
+        # 指すのに使われている。苗字で上書きすると同席制約の相手が特定できなく
+        # なるので、alias として必ず残す。
         display = next((row[key] for key in NAME_COLUMNS if row.get(key)), "")
+        row["alias"] = row.get("name", "")
         row["display_name"] = display
         row["name"] = display
         rows.append(row)

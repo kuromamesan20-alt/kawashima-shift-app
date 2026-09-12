@@ -475,3 +475,66 @@ def test_深夜のみの人に深夜と夜勤の回数が両方書かれてい�
     # 実際には上書きしていないのに「〜という意味に取りました」と言ってしまうと、
     # 反映値と食い違う情報を人に見せてしまうので、そう言っていないことを確認する。
     assert not any("という意味に取りました" in item.message for item in conflict_items)
+
+
+# --- 条件文の仮名を苗字に解決する(実データで同席制約が全部落ちていた) ----------------
+
+
+def test_条件文の仮名が苗字に解決される():
+    """条件文は「スタッフW」のような仮名のまま。名簿は苗字なので対応表で解く。
+
+    以前は照合できず、同席制約が6件すべて効いていなかった。
+    """
+    parser = ConditionParser(["岩本", "蒔田"], {"スタッフは": "岩本", "スタッフW": "蒔田"})
+    profile = StaffProfile(
+        staff_id="t", name="岩本", role="介護士", raw_conditions="夜勤はスタッフWと同席不可。"
+    )
+    parser.apply(profile)
+
+    assert [(c.other_staff, c.kind) for c in profile.pair_constraints] == [
+        ("蒔田", "no_pair_night")
+    ]
+
+
+def test_接頭辞なしの2人目も苗字に解決される():
+    """「スタッフEとW」の「W」も相手として拾う。"""
+    parser = ConditionParser(
+        ["ヒバ", "荻原", "蒔田"],
+        {"スタッフさ": "ヒバ", "スタッフE": "荻原", "スタッフW": "蒔田"},
+    )
+    profile = StaffProfile(
+        staff_id="t", name="ヒバ", role="介護士", raw_conditions="夜勤スタッフEとWは同席不可。"
+    )
+    parser.apply(profile)
+
+    assert sorted(c.other_staff for c in profile.pair_constraints) == ["荻原", "蒔田"]
+
+
+def test_自分自身は同席相手にしない():
+    parser = ConditionParser(["岩本", "蒔田"], {"スタッフは": "岩本", "スタッフW": "蒔田"})
+    profile = StaffProfile(
+        staff_id="t",
+        name="岩本",
+        role="介護士",
+        raw_conditions="夜勤はスタッフはとスタッフWは同席不可。",
+    )
+    parser.apply(profile)
+
+    assert [c.other_staff for c in profile.pair_constraints] == ["蒔田"]
+
+
+def test_仮名が複数の人に付いていたら確認に回す():
+    """同じ仮名が2人に付いていると、同席の相手を取り違える。黙って後勝ちにしない。"""
+    from kawashima_schedule.profile_builder import build_profiles
+
+    rows = [
+        {"name": "岩本", "alias": "スタッフW", "conditions": "", "notes": "",
+         "dayshift_responsible": "", "can_night": "可", "early": "", "late": ""},
+        {"name": "蒔田", "alias": "スタッフW", "conditions": "", "notes": "",
+         "dayshift_responsible": "", "can_night": "可", "early": "", "late": ""},
+    ]
+    profiles = build_profiles(rows)
+
+    assert all(
+        any(item.code == "alias_collision" for item in p.review_items) for p in profiles
+    )
