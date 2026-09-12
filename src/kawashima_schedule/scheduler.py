@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -70,6 +71,9 @@ WEIGHT_PARTNER_REPEAT = 25
 # 見落とすと勤務表がおかしいまま渡ってしまう知らせに付ける印。
 # 画面側はこの印で並べ替えず、必ず目に入る場所に出す。
 ALERT_MARK = "★要確認"
+
+# 希望が無い人を表す空の入れ物。毎回 None を確かめなくて済むようにする。
+_NO_REQUEST = StaffRequests(staff_id="", name="")
 
 
 @dataclass
@@ -139,9 +143,15 @@ def build_schedule(
 
     _add_one_mark_per_day(model, x, solver_profiles, days)
     _add_availability(model, x, solver_profiles, days)
-    _add_night_sequences(model, x, solver_profiles, days)
+    carry_night_ids = {
+        profile.staff_id
+        for profile in solver_profiles
+        if (by_staff_request.get(profile.staff_id) or _NO_REQUEST).carry_over == NIGHT_IN
+    }
+    _add_night_sequences(model, x, solver_profiles, days, carry_night_ids)
     _add_coverage(model, x, solver_profiles, days)
     _add_night_composition(model, x, solver_profiles, days)
+    _add_carry_over(model, x, solver_profiles, days, by_staff_request, result)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
@@ -262,8 +272,12 @@ def _add_availability(model, x, profiles, days) -> None:
                     model.Add(x[profile.staff_id, day.day, mark] == 0)
 
 
-def _add_night_sequences(model, x, profiles, days) -> None:
-    """夜勤は ○→△→公、深夜は ◉→公 の並びを守る。"""
+def _add_night_sequences(model, x, profiles, days, carry_night_ids=()) -> None:
+    """夜勤は ○→△→公、深夜は ◉→公 の並びを守る。
+
+    carry_night_ids は、前月の最終日が○だった人。この人たちは1日が明け(△)に
+    なるので、「月初に明けは付けない」という決めを外す。
+    """
     day_numbers = [day.day for day in days]
     last = day_numbers[-1]
 
@@ -275,8 +289,10 @@ def _add_night_sequences(model, x, profiles, days) -> None:
 
             # 明け(△)は、前日が夜勤(○)のときだけ
             if day == day_numbers[0]:
-                # 月初の明けは前月の夜勤による。ここでは付けない
-                model.Add(after == 0)
+                # 月初の明けは前月の夜勤しだい。前月末が○だと分かっている人は
+                # _add_carry_over が明けに固定するので、ここでは縛らない。
+                if staff not in carry_night_ids:
+                    model.Add(after == 0)
             else:
                 model.Add(after == x[staff, day - 1, NIGHT_IN])
 
@@ -348,16 +364,90 @@ def _add_night_composition(model, x, profiles, days) -> None:
             model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
 
 
+def _add_carry_over(model, x, profiles, days, by_staff_request, result) -> None:
+    """前月から続く夜勤・深夜を、今月1日・2日に反映する。
+
+    夜勤は ○→△→公 の3日、深夜は ◉→公 の2日にまたがる。
+    前月の最終日が分からないと、前月末に○だった人を今月1日にまた○に
+    入れてしまい、夜勤明けなしの2晩連続になる。勤務表を見ても気づけない。
+
+      前月最終日が ○ → 今月1日は △、2日は 公
+      前月最終日が △ → 今月1日は 公
+      前月最終日が ◉ → 今月1日は 公
+
+    実物の勤務表でも、毎月1日には前月から続く △ が2人いる。
+    """
+    if not days:
+        return
+    first = days[0].day
+    second = days[1].day if len(days) > 1 else None
+
+    applied = Counter()
+    for profile in profiles:
+        request = by_staff_request.get(profile.staff_id)
+        mark = request.carry_over if request else ""
+        if not mark:
+            continue
+        if mark == NIGHT_IN:
+            model.Add(x[profile.staff_id, first, NIGHT_AFTER] == 1)
+            if second is not None:
+                model.Add(x[profile.staff_id, second, OFF] == 1)
+        elif mark in (NIGHT_AFTER, LATE_NIGHT_IN):
+            model.Add(x[profile.staff_id, first, OFF] == 1)
+        else:
+            result.messages.append(
+                f"{ALERT_MARK} {profile.name}: 前月末の記号「{mark}」は"
+                "○ / △ / ◉ のどれかにしてください。今回は使っていません"
+            )
+            continue
+        applied[mark] += 1
+
+    if not applied:
+        result.messages.append(
+            f"{ALERT_MARK} 前月末の夜勤が入っていません。"
+            "入れないと、前月末に夜勤だった方を1日にまた夜勤に入れてしまうことがあります"
+        )
+        return
+
+    result.messages.append(
+        "前月から続く勤務を反映しました("
+        + "、".join(f"{mark}{count}人" for mark, count in applied.items())
+        + ")"
+    )
+    if applied[NIGHT_IN] > DAILY_REQUIREMENT[NIGHT_IN]:
+        result.messages.append(
+            f"{ALERT_MARK} 前月末の○が{applied[NIGHT_IN]}人います"
+            f"(毎日{DAILY_REQUIREMENT[NIGHT_IN]}人のはずです)。入力をご確認ください"
+        )
+    if applied[LATE_NIGHT_IN] > DAILY_REQUIREMENT[LATE_NIGHT_IN]:
+        result.messages.append(
+            f"{ALERT_MARK} 前月末の◉が{applied[LATE_NIGHT_IN]}人います"
+            f"(毎日{DAILY_REQUIREMENT[LATE_NIGHT_IN]}人のはずです)。入力をご確認ください"
+        )
+
+
 def _add_fixed_days_off(model, x, profiles, days, by_staff_request) -> None:
     """毎週の固定休み・希望休・有給などを固定する。
 
     有給・夏休・研修・健診は、希望で指定された日にだけ入れる。
     こちらで勝手に割り当てるものではないので、指定が無い日は使わない。
     """
+    first_day = {days[0].day} if days else set()
+    first_two = {day.day for day in days[:2]}
     for profile in profiles:
         request = by_staff_request.get(profile.staff_id)
         wish_off = set(request.wish_off_days()) if request else set()
         absences = request.absence_days() if request else {}
+
+        # 前月から続く勤務は「もう起きたこと」なので、希望より優先する。
+        # ここで外さないと、希望休とぶつかって組めなくなる。
+        # ただし拘束される日数は前月末の記号によって違う。
+        # ○(NIGHT_IN)なら1日目=△・2日目=公の両日、
+        # △(NIGHT_AFTER)・◉(LATE_NIGHT_IN)なら1日目=公のみで、2日目は普通に組む対象。
+        if request and request.carry_over:
+            fixed_days = first_two if request.carry_over == NIGHT_IN else first_day
+            wish_off -= fixed_days
+            absences = {d: m for d, m in absences.items() if d not in fixed_days}
 
         for day in days:
             if day.day in absences:

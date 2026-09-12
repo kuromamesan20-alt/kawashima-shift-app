@@ -20,6 +20,8 @@ from kawashima_schedule.profile_store import (  # noqa: E402
     save_requests,
 )
 from kawashima_schedule.request_sheet import (  # noqa: E402
+    CARRY_OVER_DAY,
+    _FIRST_DAY_COLUMN,
     SHEET_NAME,
     RequestSheetError,
     StaffRequests,
@@ -38,7 +40,7 @@ PROFILES = [
 def write_cell(path: Path, staff_row: int, day: int, value: str) -> None:
     workbook = load_workbook(path)
     sheet = workbook[SHEET_NAME]
-    for column in range(3, sheet.max_column + 1):
+    for column in range(_FIRST_DAY_COLUMN, sheet.max_column + 1):
         head = str(sheet.cell(row=3, column=column).value or "").split("\n")[0]
         if head == str(day):
             sheet.cell(row=staff_row, column=column, value=value)
@@ -110,7 +112,7 @@ def test_columns_are_matched_by_date_not_position(tmp_path):
 
     workbook = load_workbook(path)
     sheet = workbook[SHEET_NAME]
-    sheet.insert_cols(3)  # 日付列の手前に1本挿入
+    sheet.insert_cols(_FIRST_DAY_COLUMN)  # 日付列の手前に1本挿入
     workbook.save(path)
 
     requests, _ = import_request_sheet(path)
@@ -167,6 +169,21 @@ def test_shorter_month_reports_discarded_entries(tmp_path):
     assert discarded[0].mark == "公"
 
 
+def test_carry_over_day_is_not_reported_as_discarded(tmp_path):
+    """CARRY_OVER_DAY(0日)は前月末の引き継ぎ欄で、その月の日にちではない。
+
+    ちゃんと書き出せているのに「捨てられた記入」として誤って報告してはいけない。
+    """
+    existing = [
+        StaffRequests(staff_id="id-1", name="スタッフA", entries={CARRY_OVER_DAY: "○"})
+    ]
+    path = tmp_path / "carry.xlsx"
+
+    discarded = export_request_sheet(PROFILES, 2026, 11, path, existing)
+
+    assert discarded == []
+
+
 def test_export_request_sheet_rejects_duplicate_staff_id_in_existing(tmp_path):
     """existing の staff_id が重複していると記入が黙って消えるので、エラーにする。"""
     existing = [
@@ -192,9 +209,11 @@ def test_duplicate_day_heading_is_warned(tmp_path):
 
     workbook = load_workbook(path)
     sheet = workbook[SHEET_NAME]
-    original_first_day_value = sheet.cell(row=3, column=3).value
-    sheet.insert_cols(3)
-    sheet.cell(row=3, column=3, value=original_first_day_value)  # 1日の見出しを複製
+    original_first_day_value = sheet.cell(row=3, column=_FIRST_DAY_COLUMN).value
+    sheet.insert_cols(_FIRST_DAY_COLUMN)
+    sheet.cell(
+        row=3, column=_FIRST_DAY_COLUMN, value=original_first_day_value
+    )  # 1日の見出しを複製
     workbook.save(path)
 
     _, warnings = import_request_sheet(path)

@@ -25,6 +25,7 @@ from .shifts import (
     DAY_SHIFTS,
     HOUR_CHOICES,
     LATE_NIGHT_IN,
+    NIGHT_AFTER,
     NIGHT_IN,
     OFF,
 )
@@ -42,9 +43,17 @@ WISH_CHOICES: Tuple[str, ...] = (
     + ABSENCE_MARKS
 )
 
+# 前月の最終日の記号を「0日」として持つ。
+# 夜勤は ○→△→公、深夜は ◉→公 と複数日にまたがるので、
+# 前月末が分からないと今月1日・2日が前月と食い違う。
+# 実物の勤務表でも、毎月1日には前月から続く △ が2人いる。
+CARRY_OVER_DAY = 0
+CARRY_OVER_CHOICES: Tuple[str, ...] = (NIGHT_IN, NIGHT_AFTER, LATE_NIGHT_IN)
+
 _ID_COLUMN = 1
 _NAME_COLUMN = 2
-_FIRST_DAY_COLUMN = 3
+_CARRY_COLUMN = 3  # 前月の最終日
+_FIRST_DAY_COLUMN = 4
 _HEADER_ROW = 3
 
 _HEAD_FILL = PatternFill("solid", fgColor="2F5D8C")
@@ -68,15 +77,24 @@ class StaffRequests:
     # 日にち(1〜31) -> 記号。「公」なら希望休、シフト記号なら希望出勤。
     entries: Dict[int, str] = field(default_factory=dict)
 
+    @property
+    def carry_over(self) -> str:
+        """前月の最終日の記号(○ / △ / ◉)。無ければ空。"""
+        return self.entries.get(CARRY_OVER_DAY, "")
+
     def wish_off_days(self) -> List[int]:
-        return sorted(day for day, mark in self.entries.items() if mark == WISH_OFF)
+        return sorted(
+            day
+            for day, mark in self.entries.items()
+            if mark == WISH_OFF and day >= 1
+        )
 
     def wish_work_days(self) -> Dict[int, str]:
         """希望出勤。有給・研修などの「勤務しない」記号は含めない。"""
         return {
             day: mark
             for day, mark in sorted(self.entries.items())
-            if mark != WISH_OFF and mark not in ABSENCE_MARKS
+            if day >= 1 and mark != WISH_OFF and mark not in ABSENCE_MARKS
         }
 
     def absence_days(self) -> Dict[int, str]:
@@ -84,7 +102,7 @@ class StaffRequests:
         return {
             day: mark
             for day, mark in sorted(self.entries.items())
-            if mark in ABSENCE_MARKS
+            if day >= 1 and mark in ABSENCE_MARKS
         }
 
 
@@ -128,6 +146,10 @@ def export_request_sheet(
             )
         filled[request.staff_id] = request.entries
         for day, mark in request.entries.items():
+            # CARRY_OVER_DAY(0日)は前月末の引き継ぎ欄で、その月の日にちではない。
+            # 捨てられたわけではないので discarded に入れない。
+            if day == CARRY_OVER_DAY:
+                continue
             if day not in day_numbers:
                 discarded.append(DiscardedEntry(name=request.name, day=day, mark=mark))
 
@@ -147,6 +169,7 @@ def export_request_sheet(
     _add_validation(sheet, len(active), len(days))
     sheet.column_dimensions[get_column_letter(_ID_COLUMN)].hidden = True
     sheet.column_dimensions[get_column_letter(_NAME_COLUMN)].width = 12
+    sheet.column_dimensions[get_column_letter(_CARRY_COLUMN)].width = 8
     sheet.freeze_panes = sheet.cell(row=_HEADER_ROW + 1, column=_FIRST_DAY_COLUMN)
 
     _write_legend(workbook)
@@ -166,12 +189,17 @@ def _write_intro(sheet, year: int, month: int, day_count: int) -> None:
             "各セルのプルダウンから選んでください。"
             "休みたい日は「公」、この勤務に入りたい日はその記号を選びます。"
             "希望が無い日は空欄のままで結構です。"
+            "いちばん左の「前月末」には、前月の最終日に○・△・◉だった方だけ入れてください。"
         ),
     )
 
 
 def _write_header(sheet, days: Sequence[Day]) -> None:
-    for label, column in (("ID", _ID_COLUMN), ("スタッフ", _NAME_COLUMN)):
+    for label, column in (
+        ("ID", _ID_COLUMN),
+        ("スタッフ", _NAME_COLUMN),
+        ("前月末", _CARRY_COLUMN),
+    ):
         cell = sheet.cell(row=_HEADER_ROW, column=column, value=label)
         cell.font = Font(bold=True, color="FFFFFF", size=11)
         cell.fill = _HEAD_FILL
@@ -199,6 +227,13 @@ def _write_staff_row(
     name_cell.border = _BORDER
     name_cell.alignment = Alignment(vertical="center")
 
+    carry = sheet.cell(row=row, column=_CARRY_COLUMN)
+    carry.value = entries.get(CARRY_OVER_DAY) or None
+    carry.fill = _NAME_FILL
+    carry.border = _BORDER
+    carry.alignment = Alignment(horizontal="center", vertical="center")
+    carry.number_format = "@"
+
     for index, day in enumerate(days):
         cell = sheet.cell(row=row, column=_FIRST_DAY_COLUMN + index)
         cell.value = entries.get(day.day) or None
@@ -214,6 +249,14 @@ def _write_staff_row(
 def _add_validation(sheet, staff_count: int, day_count: int) -> None:
     if not staff_count or not day_count:
         return
+    carry = DataValidation(
+        type="list", formula1='"' + ",".join(CARRY_OVER_CHOICES) + '"', allow_blank=True
+    )
+    sheet.add_data_validation(carry)
+    carry_letter = get_column_letter(_CARRY_COLUMN)
+    carry.add(
+        f"{carry_letter}{_HEADER_ROW + 1}:{carry_letter}{_HEADER_ROW + staff_count}"
+    )
     validation = DataValidation(
         type="list", formula1='"' + ",".join(WISH_CHOICES) + '"', allow_blank=True
     )
@@ -230,6 +273,11 @@ def _write_legend(workbook: Workbook) -> None:
     rows = [
         ("記号", "意味"),
         (OFF, "この日は休みたい（希望休）"),
+        (
+            "前月末",
+            "前月の最終日の記号。○(夜勤)・△(明け)・◉(深夜)だけ入れます。"
+            "前月から続く勤務を引き継ぐために使います",
+        ),
     ]
     rows += [
         (code, f"この日は {times[0]}-{times[1]} の勤務に入りたい")
@@ -287,6 +335,17 @@ def import_request_sheet(path: Path) -> Tuple[List[StaffRequests], List[str]]:
             continue
 
         entries: Dict[int, str] = {}
+
+        carry = _text(sheet.cell(row=row, column=_CARRY_COLUMN).value)
+        if carry:
+            if carry in CARRY_OVER_CHOICES:
+                entries[CARRY_OVER_DAY] = carry
+            else:
+                warnings.append(
+                    f"{name} の前月末「{carry}」は"
+                    f"{' / '.join(CARRY_OVER_CHOICES)} のどれかにしてください(無視しました)"
+                )
+
         for day, column in day_columns.items():
             mark = _text(sheet.cell(row=row, column=column).value)
             if not mark:

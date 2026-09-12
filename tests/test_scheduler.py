@@ -26,11 +26,16 @@ from kawashima_schedule.scheduler import (  # noqa: E402
     allowed_entry_marks,
     build_schedule,
 )
-from kawashima_schedule.request_sheet import StaffRequests  # noqa: E402
+from kawashima_schedule.request_sheet import (  # noqa: E402
+    CARRY_OVER_DAY,
+    StaffRequests,
+)
 from kawashima_schedule.shifts import (  # noqa: E402
     LATE_NIGHT_IN,
+    NIGHT_AFTER,
     NIGHT_IN,
     OFF,
+    PAID_LEAVE,
     REQUIRED_DAY_SHIFTS,
 )
 
@@ -675,3 +680,153 @@ def test_組めない理由が人数でないときはその旨を伝える(monk
     assert any("日ごとの人数だけを見ると足りています" in m for m in result.messages), (
         result.messages
     )
+
+
+# --- 前月からの引き継ぎ ----------------------------------------------------------
+
+
+def _carry_over_staff() -> List[StaffProfile]:
+    """数日ぶんの夜勤を回せるだけの人数をそろえた構成。
+
+    ○ は 看護1+介護1 が毎日必要で、入った人は翌日△・翌々日公になる。
+    日数ぶんの顔ぶれが要るので、余裕をもって用意する。
+    """
+    staff = [p for p in _coverage_staff() if p.staff_id.startswith("day-")]
+    for index in range(1, 5):
+        staff.append(
+            StaffProfile(
+                staff_id=f"nurse-{index}",
+                name=f"看護{index}",
+                role="看護師",
+                available_day_shifts=[],
+                can_night=True,
+                can_late_night=False,
+            )
+        )
+        staff.append(
+            StaffProfile(
+                staff_id=f"care-{index}",
+                name=f"介護{index}",
+                role="介護士",
+                available_day_shifts=[],
+                can_night=True,
+                can_late_night=False,
+            )
+        )
+        staff.append(
+            StaffProfile(
+                staff_id=f"late-{index}",
+                name=f"深夜{index}",
+                role="介護士",
+                available_day_shifts=[],
+                can_night=False,
+                can_late_night=True,
+            )
+        )
+    return staff
+
+
+def test_前月末が夜勤なら1日は明けで2日は公休(monkeypatch):
+    """○→△→公 は3日にまたがる。前月末に○だった人を1日にまた○に入れてはいけない。"""
+    days = [Day(date(2026, 9, day)) for day in (1, 2, 3)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _carry_over_staff()
+    nurse = next(p for p in profiles if p.staff_id == "nurse-1")
+    wish = StaffRequests(
+        staff_id=nurse.staff_id, name=nurse.name, entries={CARRY_OVER_DAY: NIGHT_IN}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments[nurse.staff_id][1] == NIGHT_AFTER
+    assert result.assignments[nurse.staff_id][2] == OFF
+
+
+def test_前月末が深夜なら1日は公休(monkeypatch):
+    days = [Day(date(2026, 9, day)) for day in (1, 2)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _carry_over_staff()
+    wish = StaffRequests(
+        staff_id="late-1", name="深夜1", entries={CARRY_OVER_DAY: LATE_NIGHT_IN}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["late-1"][1] == OFF
+
+
+def test_前月末が明けなら1日は公休(monkeypatch):
+    days = [Day(date(2026, 9, day)) for day in (1, 2)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _carry_over_staff()
+    wish = StaffRequests(
+        staff_id="late-1", name="深夜1", entries={CARRY_OVER_DAY: NIGHT_AFTER}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["late-1"][1] == OFF
+
+
+def test_前月末が入っていなければ知らせる(monkeypatch):
+    """入れ忘れると前月と食い違う。黙って組まない。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert any(
+        ALERT_MARK in m and "前月末の夜勤が入っていません" in m for m in result.messages
+    ), result.messages
+
+
+def test_前月末が明けや深夜なら2日目の有給は普通に組む(monkeypatch):
+    """前月末が△・◉の人は1日目だけが公休で拘束される。2日目は普通の希望日なので
+
+    有給を出していればそのまま反映されるべきで、勝手に禁止してはいけない。
+    """
+    days = [Day(date(2026, 9, day)) for day in (1, 2, 3)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _carry_over_staff()
+    wish = StaffRequests(
+        staff_id="late-1",
+        name="深夜1",
+        entries={CARRY_OVER_DAY: LATE_NIGHT_IN, 2: PAID_LEAVE},
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["late-1"][1] == OFF
+    assert result.assignments["late-1"][2] == PAID_LEAVE
+
+
+def test_前月からの勤務は希望休より優先する(monkeypatch):
+    """前月末に○だった人が1日に希望休を出していても、明けが先。
+
+    「もう起きたこと」なので希望では動かせない。ここで外さないと組めなくなる。
+    """
+    days = [Day(date(2026, 9, day)) for day in (1, 2, 3)]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _carry_over_staff()
+    nurse = next(p for p in profiles if p.staff_id == "nurse-1")
+    wish = StaffRequests(
+        staff_id=nurse.staff_id,
+        name=nurse.name,
+        entries={CARRY_OVER_DAY: NIGHT_IN, 1: "公"},
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments[nurse.staff_id][1] == NIGHT_AFTER

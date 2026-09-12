@@ -20,7 +20,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from kawashima_schedule.calendar_utils import month_days, month_label  # noqa: E402
 from kawashima_schedule.profile_store import load_profiles  # noqa: E402
-from kawashima_schedule.request_sheet import WISH_CHOICES, StaffRequests  # noqa: E402
+from kawashima_schedule.request_sheet import (  # noqa: E402
+    CARRY_OVER_CHOICES,
+    CARRY_OVER_DAY,
+    WISH_CHOICES,
+    StaffRequests,
+)
 from kawashima_schedule.request_storage import get_storage  # noqa: E402
 from kawashima_schedule.excel_export import export_schedule  # noqa: E402
 from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E402
@@ -37,6 +42,9 @@ PROFILES_PATH = Path(__file__).parent / "data/staff_profiles/case001.yaml"
 # 空欄はStreamlitが薄い「None」と表示してしまうので、控えめな記号を置く。
 # 画面を埋め尽くさないよう短くし、保存時には空欄に戻す。
 BLANK = "・"
+# 前月の最終日の列。夜勤は ○→△→公 と3日にまたがるので、
+# 前月末が分からないと1日・2日が前月と食い違う。
+CARRY_LABEL = "前月末"
 
 MEANING = {
     OFF: "休みたい",
@@ -240,6 +248,11 @@ def _show_legend() -> None:
             st.markdown("　/　".join(chunk))
         st.caption("夜勤は ○ → △ → 公 の3日、深夜は ◉ → 公 の2日が続きます。")
         st.caption(
+            f"いちばん左の「{CARRY_LABEL}」には、"
+            "**前月の最終日**に ○・△・◉ だった方だけ入れてください。"
+            "前月から続く勤務を引き継ぐために使います(ふつうは5人)。"
+        )
+        st.caption(
             f"時短({' / '.join(HOUR_CHOICES)})は、勤務時間が決まっている方のためのものです。"
             "番号のシフトで組む方に選ぶと、作るときに知らせが出ます。"
         )
@@ -250,7 +263,11 @@ def _to_frame(profiles, days, saved) -> pd.DataFrame:
     for profile in profiles:
         entries = saved[profile.staff_id].entries if profile.staff_id in saved else {}
         # スタッフIDは同姓同名の職員を取り違えないための突き合わせ用。画面には出さない。
-        row = {"スタッフID": profile.staff_id, "スタッフ": profile.name}
+        row = {
+            "スタッフID": profile.staff_id,
+            "スタッフ": profile.name,
+            CARRY_LABEL: entries.get(CARRY_OVER_DAY) or BLANK,
+        }
         for day in days:
             row[_column(day)] = entries.get(day.day) or BLANK
         rows.append(row)
@@ -265,6 +282,13 @@ def _column_config(days):
     config = {
         "スタッフID": st.column_config.TextColumn("スタッフID"),
         "スタッフ": st.column_config.TextColumn("スタッフ", width="small", pinned=True),
+        CARRY_LABEL: st.column_config.SelectboxColumn(
+            CARRY_LABEL,
+            options=[BLANK] + list(CARRY_OVER_CHOICES),
+            width="small",
+            help="前月の最終日の記号。前月から続く勤務を引き継ぐために使います",
+            required=False,
+        ),
     }
     for day in days:
         label = _column(day)
@@ -279,7 +303,7 @@ def _column_config(days):
 
 def _column_order(days):
     """画面に表示する列の順番。スタッフID列は突き合わせ専用なので表示しない。"""
-    return ["スタッフ"] + [_column(day) for day in days]
+    return ["スタッフ", CARRY_LABEL] + [_column(day) for day in days]
 
 
 def _from_frame(frame, profiles, days):
@@ -291,6 +315,9 @@ def _from_frame(frame, profiles, days):
         if profile is None:
             continue
         entries = {}
+        carry = str(row.get(CARRY_LABEL, "") or "").strip()
+        if carry and carry != BLANK:
+            entries[CARRY_OVER_DAY] = carry
         for day in days:
             mark = str(row.get(_column(day), "") or "").strip()
             if mark and mark != BLANK:
