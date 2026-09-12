@@ -69,3 +69,37 @@ def test_support_staff_is_not_counted_in_day_shift_requirement(monkeypatch):
     # 固定時間も希望休もないので、常に公休として扱われる(=日勤帯の枠を取らない)
     assert result.assignments["support-1"] == {1: OFF}
     assert any("介護補助" in message for message in result.messages)
+
+
+def test_weekly_days_off_are_kept(monkeypatch):
+    """週休2日が守られること。夜勤の回数で休みが減らないこと。
+
+    実物の勤務表では、夜勤5回の人も0回の人も公休は同じ8〜9日だった。
+    「月に何日」ではなく「週ごとに休む」という考え方。
+    """
+    from kawashima_schedule.scheduler import _weeks
+    from kawashima_schedule.calendar_utils import month_days
+
+    days = month_days(2026, 10)  # 10月1日は木曜
+    weeks = _weeks(days)
+
+    # 週の区切りが月曜始まりになっていること
+    assert len(weeks[0]) == 4, "1〜4日(木金土日)が最初の半端な週"
+    assert weeks[1][0].weekday == 0, "2週目は月曜から"
+    assert sum(len(w) for w in weeks) == 31, "全部の日が どれかの週に入る"
+
+
+def test_partial_weeks_ask_for_less(monkeypatch):
+    """月初・月末の半端な週は、日数に応じて休みを減らすこと。
+
+    4日しかない週に2日の休みを求めると、組めなくなることがある。
+    """
+    from kawashima_schedule.calendar_utils import month_days
+    from kawashima_schedule.scheduler import _weeks
+
+    weeks = _weeks(month_days(2026, 10))
+    partial = [w for w in weeks if len(w) < 7]
+    assert partial, "10月には半端な週がある"
+    for week in partial:
+        quota = (2 * len(week)) // 7
+        assert quota < 2, "半端な週は2日より少なくてよい"

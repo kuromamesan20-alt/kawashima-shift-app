@@ -119,6 +119,7 @@ def build_schedule(
     _add_coverage(model, x, solver_profiles, days)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
+    _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
     se = _add_responsible(model, x, solver_profiles, days, result)
 
@@ -296,6 +297,46 @@ def _add_fixed_days_off(model, x, profiles, days, by_staff_request) -> None:
             for day in days:
                 if absences.get(day.day) != mark:
                     model.Add(x[profile.staff_id, day.day, mark] == 0)
+
+
+def _add_weekly_days_off(model, x, profiles, days, by_staff_request) -> None:
+    """週休2日にする。月に何日と数えるのではなく、週ごとに休みを確保する。
+
+    夜勤明けの次の「公」も、この休みに含める(実物がそうなっている)。
+    月をまたぐ週は日数が足りないので、その週にある日数に応じて緩める。
+
+    「週◯日勤務」と決まっているパート職員は、休みの数え方が違うので対象にしない。
+    """
+    for profile in profiles:
+        if profile.writes_own_hours or profile.is_support_staff:
+            continue
+        # 週5日勤務なら休みは2日。それ以外は 7 - 週の勤務日数。
+        weekly_work = profile.weekly_work_days or 5
+        needed = max(0, 7 - weekly_work)
+        if needed == 0:
+            continue
+
+        for week in _weeks(days):
+            # 月初・月末の半端な週は、その週にある日数に応じて減らす
+            quota = needed if len(week) == 7 else (needed * len(week)) // 7
+            if quota == 0:
+                continue
+            model.Add(
+                sum(x[profile.staff_id, day.day, OFF] for day in week) >= quota
+            )
+
+
+def _weeks(days):
+    """月曜始まりで週に区切る。月初・月末は半端な週になる。"""
+    weeks, current = [], []
+    for day in days:
+        if day.weekday == 0 and current:
+            weeks.append(current)
+            current = []
+        current.append(day)
+    if current:
+        weeks.append(current)
+    return weeks
 
 
 def _add_monthly_off_quota(model, x, profiles, days) -> None:
