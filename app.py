@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
-import sys
+import hmac
 import io
+import os
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -60,12 +62,67 @@ MEANING = {
 def main() -> None:
     st.set_page_config(page_title="勤務表", layout="wide")
 
+    # 合言葉を通らないと中身を出さない。
+    # スタッフの氏名・希望休が見えるうえ、書き換えもできる画面なので、
+    # URLを知っただけでは開けないようにする。
+    if not _unlocked():
+        _password_page()
+        return
+
     # 上のタブで画面を切り替える。URLを分けると案内が増えるので1つにまとめる。
     wish_tab, build_tab = st.tabs(["希望を入力する", "勤務表を作る"])
     with wish_tab:
         _wish_page()
     with build_tab:
         _build_page()
+
+
+# --- 合言葉 --------------------------------------------------------------------
+
+_UNLOCKED_KEY = "unlocked"
+
+
+def _password_page() -> None:
+    """合言葉の入力画面。ここを通らないと中身は出ない。"""
+    st.title("勤務表アプリ")
+
+    password = _app_password()
+    if not password:
+        st.error("合言葉が設定されていないため、開けません。")
+        st.info(
+            "Streamlit Cloud の Settings → Secrets に "
+            "`app_password = \"(合言葉)\"` を追加してください。"
+        )
+        return
+
+    st.write("合言葉を入れてください。")
+    with st.form("password_form"):
+        entered = st.text_input("合言葉", type="password")
+        submitted = st.form_submit_button("開く", type="primary")
+
+    if submitted:
+        # 文字数の違いから中身を推測されないよう、時間のかからない比較を使う。
+        # compare_digest は非ASCIIの文字列を比較できないので、バイト列にしてから渡す。
+        # (日本語の合言葉を設定したときにここで落ちる)
+        if hmac.compare_digest(entered.strip().encode("utf-8"), password.encode("utf-8")):
+            st.session_state[_UNLOCKED_KEY] = True
+            st.rerun()
+        else:
+            st.error("合言葉が違います。")
+
+
+def _unlocked() -> bool:
+    return bool(st.session_state.get(_UNLOCKED_KEY))
+
+
+def _app_password() -> str:
+    """合言葉を読む。手元で動かすときは環境変数でも指定できる。"""
+    secrets = _secrets()
+    if secrets is not None:
+        value = str(secrets.get("app_password") or "").strip()
+        if value:
+            return value
+    return os.environ.get("SHIFT_APP_PASSWORD", "").strip()
 
 
 def _wish_page() -> None:
