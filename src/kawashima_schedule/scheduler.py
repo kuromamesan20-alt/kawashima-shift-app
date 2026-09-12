@@ -50,6 +50,10 @@ WEIGHT_AVOID_EARLY = 5  # 早出には入れていない
 # 本当に最後の手段にする(これを破るくらいなら他の希望を諦める、という強さ)。
 WEIGHT_LAST_RESORT = 300
 
+# 深夜(◉)は介護職が8〜9割。看護職で入るのは決まった人だけ。
+# 実物の2026年7月では、看護職の深夜3回はすべて齋藤さんだった。
+NURSES_ALLOWED_ON_LATE_NIGHT = ("齋藤",)
+
 
 @dataclass
 class ScheduleResult:
@@ -117,6 +121,7 @@ def build_schedule(
     _add_availability(model, x, solver_profiles, days)
     _add_night_sequences(model, x, solver_profiles, days)
     _add_coverage(model, x, solver_profiles, days)
+    _add_night_composition(model, x, solver_profiles, days)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
@@ -271,6 +276,36 @@ def _add_coverage(model, x, profiles, days) -> None:
                 sum(x[profile.staff_id, day.day, mark] for profile in profiles)
                 == DAILY_REQUIREMENT[mark]
             )
+
+
+def _add_night_composition(model, x, profiles, days) -> None:
+    """夜間の顔ぶれを決める。
+
+      ○(夜勤) 2人 … 看護職1人 + 介護職1人
+      ◉(深夜) 1人 … 原則は介護職。看護職で入れるのは決まった人だけ
+
+    どちらも実物の2026年7月で確かめた(夜勤は31日中30日がこの組み合わせ、
+    深夜は介護職90%・看護職10%でその全部が同じ人)。
+    """
+    nurses = [p for p in profiles if p.is_nurse]
+    caregivers = [p for p in profiles if p.is_caregiver]
+
+    for day in days:
+        if nurses:
+            model.Add(
+                sum(x[p.staff_id, day.day, NIGHT_IN] for p in nurses) == 1
+            )
+        if caregivers:
+            model.Add(
+                sum(x[p.staff_id, day.day, NIGHT_IN] for p in caregivers) == 1
+            )
+
+    # 深夜に入れない看護職を止める
+    for profile in profiles:
+        if not profile.is_nurse or profile.name in NURSES_ALLOWED_ON_LATE_NIGHT:
+            continue
+        for day in days:
+            model.Add(x[profile.staff_id, day.day, LATE_NIGHT_IN] == 0)
 
 
 def _add_fixed_days_off(model, x, profiles, days, by_staff_request) -> None:

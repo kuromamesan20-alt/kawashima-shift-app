@@ -141,6 +141,16 @@ class StaffProfile:
         """表示用。確認してほしい理由の文だけを取り出す。"""
         return [item.message for item in self.review_items]
 
+    @property
+    def is_nurse(self) -> bool:
+        """看護職か。夜勤を看護1人+介護1人で組むための判定。"""
+        return "看護" in self.role
+
+    @property
+    def is_caregiver(self) -> bool:
+        """介護職か。"""
+        return "介護" in self.role
+
     def is_on_leave(self, year: int, month: int) -> bool:
         """その年月に休職しているか。leave_from は "2026-09" の形。"""
         if not self.leave_from:

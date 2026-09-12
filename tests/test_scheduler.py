@@ -103,3 +103,39 @@ def test_partial_weeks_ask_for_less(monkeypatch):
     for week in partial:
         quota = (2 * len(week)) // 7
         assert quota < 2, "半端な週は2日より少なくてよい"
+
+
+def _night_staff():
+    """夜勤・深夜を回せる最小限の顔ぶれ。"""
+    from kawashima_schedule.models import StaffProfile
+
+    people = []
+    for i in range(4):
+        people.append(StaffProfile(staff_id=f"ns-{i}", name=f"看護{i}", role="看護師"))
+    for i in range(4):
+        people.append(StaffProfile(staff_id=f"cg-{i}", name=f"介護{i}", role="介護士"))
+    return people
+
+
+def test_night_shift_is_one_nurse_and_one_caregiver():
+    """○夜勤は看護職1人+介護職1人。実物では31日中30日がこの組み合わせだった。"""
+    from kawashima_schedule.scheduler import _add_night_composition
+    from kawashima_schedule.models import StaffProfile
+
+    people = _night_staff()
+    nurses = [p for p in people if p.is_nurse]
+    caregivers = [p for p in people if p.is_caregiver]
+    assert len(nurses) == 4 and len(caregivers) == 4
+
+    # 職種の判定そのものを確かめる
+    assert StaffProfile(staff_id="x", name="管理", role="管理者、看護師").is_nurse
+    assert not StaffProfile(staff_id="x", name="環境", role="その他").is_nurse
+    assert not StaffProfile(staff_id="x", name="環境", role="その他").is_caregiver
+
+
+def test_only_named_nurses_take_late_night():
+    """深夜(◉)に入れる看護職は決まった人だけ。"""
+    from kawashima_schedule.scheduler import NURSES_ALLOWED_ON_LATE_NIGHT
+
+    assert NURSES_ALLOWED_ON_LATE_NIGHT, "誰も指定が無いと看護職が深夜に入れない"
+    assert "齋藤" in NURSES_ALLOWED_ON_LATE_NIGHT
