@@ -49,6 +49,10 @@ WEIGHT_WEEKEND_OFF = 5  # 土日どちらかは休みたい
 WEIGHT_AVOID_EARLY = 5  # 早出には入れていない
 # 「他の人で埋まらないときだけ使う」枠。他のどのソフト制約より重くして、
 # 本当に最後の手段にする(これを破るくらいなら他の希望を諦める、という強さ)。
+# 夜勤明けの翌日にまた夜勤に入る形。実物に1件あり許容されるが、
+# 体への負担が大きいので、他に手が無いときだけになるよう強めに抑える。
+WEIGHT_NIGHT_AFTER_NIGHT = 200
+
 WEIGHT_LAST_RESORT = 300
 
 # 深夜(◉)は介護職が8〜9割。看護職で入るのは決まった人だけ。
@@ -251,9 +255,17 @@ def _add_night_sequences(model, x, profiles, days) -> None:
             else:
                 model.Add(after == x[staff, day - 1, NIGHT_IN])
 
-            # 夜勤の翌々日は公休。月末をまたぐ分は翌月に持ち越すので課さない
+            # 夜勤の翌々日は原則として公休。
+            # ただし実物には「明けの翌日に次の夜勤」が1件あり、許容されるとのこと。
+            # そこで「公休 または 次の夜勤」を認め、公休から外れた分はペナルティで抑える。
             if day + 2 <= last:
-                model.AddImplication(night, x[staff, day + 2, OFF])
+                model.AddBoolOr(
+                    [
+                        night.Not(),
+                        x[staff, day + 2, OFF],
+                        x[staff, day + 2, NIGHT_IN],
+                    ]
+                )
 
             # 深夜(◉)の翌日は公休
             if day + 1 <= last:
@@ -562,6 +574,18 @@ def _soft_constraints(model, x, profiles, days, by_staff_request) -> List:
             for day in days:
                 for code in EARLY_SHIFTS:
                     penalties.append(WEIGHT_AVOID_EARLY * x[staff, day.day, code])
+
+        # 夜勤明けの翌日にまた夜勤、という形をできるだけ避ける
+        day_numbers = [day.day for day in days]
+        for day in day_numbers:
+            if day + 2 > day_numbers[-1]:
+                continue
+            back_to_back = model.NewBoolVar(f"night_chain_{staff}_{day}")
+            model.Add(
+                back_to_back
+                >= x[staff, day, NIGHT_IN] + x[staff, day + 2, NIGHT_IN] - 1
+            )
+            penalties.append(WEIGHT_NIGHT_AFTER_NIGHT * back_to_back)
 
         # 他の人で埋まらないときだけ使う枠(師長の早出・遅出など)
         for code in profile.last_resort_day_shifts:
