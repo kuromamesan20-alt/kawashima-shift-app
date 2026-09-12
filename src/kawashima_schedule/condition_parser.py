@@ -91,6 +91,7 @@ class ConditionParser:
     def __init__(self, roster: Sequence[str]):
         # 同席相手の照合に使う。長い名前を先に試すため長さ降順で持つ。
         self._roster = sorted({normalize(n) for n in roster}, key=len, reverse=True)
+        self._explicit_late_night = False
 
     # -- 公開API ---------------------------------------------------------------
 
@@ -99,6 +100,9 @@ class ConditionParser:
         # 「夜勤3回」の次の行に「やむを得ない場合4回」が来るような、
         # 前の文を受ける書き方に対応するため直前の解釈内容を覚えておく。
         context: Dict[str, Any] = {"last_shift": None, "last_pairs": [], "base_shift": None}
+        # 「深夜」と名指しで可否が書かれたか。この後に来る「夜勤」(夜間業務全体を指す)
+        # でうっかり上書きしないようにする。
+        self._explicit_late_night = False
         for source_label, text in (
             ("固定条件", profile.raw_conditions),
             ("備考", profile.raw_notes),
@@ -115,27 +119,39 @@ class ConditionParser:
 
     @staticmethod
     def _cross_check_counts(profile: StaffProfile) -> None:
-        """入れない区分に回数が付いている矛盾を、黙って捨てずに確認に回す。
+        """入れない区分に回数が付いている場合の後始末。
 
         「深夜勤務のみ。夜勤専従で毎月2〜3回」のように、原文が「夜勤」と「深夜」を
-        区別せずに書いていることがある。どちらの回数なのかはこちらでは決められない。
+        区別せずに書いていることがある。施設の担当者の言う「夜勤」は夜間業務全体の
+        ことなので、◉しか入らない人の「夜勤N回」は◉の回数と読める。
+        ただし読み替えた事実は必ず確認に回す。
         """
+        # 「夜勤」は夜間業務全体を指す言葉なので、◉しか入らない人に書かれた
+        # 「夜勤N回」は◉の回数のこと。そう読み替えたうえで、念のため確認に回す。
         if profile.late_night_only and profile.night_shift_count:
             low, high = profile.night_shift_count
-            profile.flag_review(
-                f"「深夜勤務のみ」の方に夜勤 {low}〜{high}回 と書かれています。"
-                "深夜の回数のことでしょうか",
-                code="count_conflict",
-                label=f"{profile.name}/夜勤回数",
-            )
-        if profile.night_shift_exclusive and profile.late_night_shift_count:
-            low, high = profile.late_night_shift_count
-            profile.flag_review(
-                f"「夜勤専従」の方に深夜 {low}〜{high}回 と書かれています。"
-                "夜勤の回数のことでしょうか",
-                code="count_conflict",
-                label=f"{profile.name}/深夜回数",
-            )
+            if profile.late_night_shift_count is None:
+                profile.late_night_shift_count = profile.night_shift_count
+                profile.night_shift_count = None
+                profile.flag_review(
+                    f"「深夜勤務のみ」の方に夜勤 {low}〜{high}回 と書かれていたので、"
+                    f"深夜(◉)を月{low}〜{high}回という意味に取りました",
+                    code="count_conflict",
+                    label=f"{profile.name}/夜勤回数",
+                )
+            else:
+                # 深夜の回数が既に書かれているのに、別に夜勤の回数も書かれている場合は
+                # どちらが本来の希望なのか分からない。既存の深夜回数を黙って上書きせず、
+                # 人が見て判断できるように両方の値をメッセージに残す。
+                d_low, d_high = profile.late_night_shift_count
+                profile.night_shift_count = None
+                profile.flag_review(
+                    f"「深夜勤務のみ」の方に深夜 {d_low}〜{d_high}回 と、"
+                    f"夜勤 {low}〜{high}回 の両方が書かれています。"
+                    "どちらが正しいか確認してください",
+                    code="count_conflict",
+                    label=f"{profile.name}/夜勤回数",
+                )
         if profile.day_shift_only and (
             profile.night_shift_count or profile.late_night_shift_count
         ):
@@ -488,9 +504,16 @@ class ConditionParser:
                 matched = True
                 continue
             if shift == "夜勤":
+                # 施設の担当者の言う「夜勤」は夜間業務のことで、
+                # ○(夜勤)と◉(深夜)の両方を指す(施設の担当者に確認済み)。
+                # 「夜勤不可」なら夜間はどちらも入らない。
                 profile.can_night = allowed
+                if not self._explicit_late_night:
+                    profile.can_late_night = allowed
             elif shift == "深夜":
+                # 「深夜」は◉だけを名指ししている。こちらが優先。
                 profile.can_late_night = allowed
+                self._explicit_late_night = True
             elif shift in ("早出", "早番") and not allowed:
                 # 時間の指定がない「早番不可」は、早い方の日勤帯を外す
                 profile.restrict_day_shifts(

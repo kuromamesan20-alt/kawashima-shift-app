@@ -424,3 +424,54 @@ def test_専従の文に同居した回数を落とさない():
 def test_深夜のみの人に夜勤回数があれば確認に回す():
     profile = _parse("深夜勤務のみ。夜勤専従で毎月2〜3回希望。")
     assert any(item.code == "count_conflict" for item in profile.review_items)
+
+
+# --- 「夜勤」は夜間業務全体を指す(施設の担当者に確認済み) --------------------------
+
+
+def test_夜勤不可は深夜にも入らない():
+    """施設の担当者の言う「夜勤」は ○ と ◉ の両方。片方だけ止めると◉に入ってしまう。"""
+    profile = _parse("夜勤不可。")
+    assert profile.can_night is False
+    assert profile.can_late_night is False
+
+
+def test_深夜と名指しされていればそちらが優先():
+    """「夜勤不可。深夜可能。」— 齋藤さんの書き方。実物でも◉だけ入っていた。"""
+    profile = _parse("夜勤不可。深夜可能。")
+    assert profile.can_night is False
+    assert profile.can_late_night is True
+
+
+def test_深夜の可否は後から来た夜勤で上書きされない():
+    """順番が逆でも結果が変わらないこと。"""
+    profile = _parse("深夜可能。夜勤不可。")
+    assert profile.can_night is False
+    assert profile.can_late_night is True
+
+
+def test_深夜のみの人の夜勤回数は深夜の回数として読む():
+    profile = _parse("深夜勤務のみ。夜勤専従で毎月2〜3回希望。")
+    assert profile.late_night_shift_count == (2, 3)
+    assert profile.night_shift_count is None
+    assert any(item.code == "count_conflict" for item in profile.review_items)
+
+
+def test_深夜のみの人に深夜と夜勤の回数が両方書かれていたら既存の深夜回数を保つ():
+    """「深夜勤務のみ。深夜2回。夜勤専従で毎月3〜4回希望。」のように、
+    深夜の回数が既に書かれているのに別途夜勤の回数も書かれている場合。
+    どちらが本来の希望か分からないので、既存の深夜回数を黙って上書きせず、
+    両方の回数が書かれている旨のメッセージで確認に回す。
+    """
+    profile = _parse("深夜勤務のみ。深夜2回。夜勤専従で毎月3〜4回希望。")
+    assert profile.late_night_shift_count == (2, 2)
+    assert profile.night_shift_count is None
+    conflict_items = [item for item in profile.review_items if item.code == "count_conflict"]
+    assert conflict_items
+    assert any(
+        "2〜2回" in item.message and "3〜4回" in item.message and "両方" in item.message
+        for item in conflict_items
+    )
+    # 実際には上書きしていないのに「〜という意味に取りました」と言ってしまうと、
+    # 反映値と食い違う情報を人に見せてしまうので、そう言っていないことを確認する。
+    assert not any("という意味に取りました" in item.message for item in conflict_items)

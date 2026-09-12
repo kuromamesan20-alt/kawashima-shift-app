@@ -15,10 +15,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from kawashima_schedule import scheduler as scheduler_module  # noqa: E402
 from kawashima_schedule.calendar_utils import Day  # noqa: E402
 from kawashima_schedule.models import FixedTimeSlot, StaffProfile  # noqa: E402
-from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E402
+from kawashima_schedule.scheduler import (  # noqa: E402
+    ALERT_MARK,
+    allowed_entry_marks,
+    build_schedule,
+)
 from kawashima_schedule.request_sheet import StaffRequests  # noqa: E402
 from kawashima_schedule.shifts import (  # noqa: E402
     LATE_NIGHT_IN,
+    NIGHT_IN,
     OFF,
     REQUIRED_DAY_SHIFTS,
 )
@@ -336,3 +341,30 @@ def test_希望出勤が無く有給だけの人は勤務0日として要確認�
     # 有給は「勤務した日」ではないので、勤務0日として要確認に回る
     assert any(ALERT_MARK in m and "有給だけさん" in m for m in result.messages)
     assert not any("そのまま入れました" in m and "有給だけさん" in m for m in result.messages)
+
+
+def test_夜勤専従は深夜にも入れる(monkeypatch):
+    """「夜勤専従」は夜間業務の専従という意味で、○だけでなく◉にも入る。
+
+    以前は○だけに絞っていた。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    exclusive = StaffProfile(
+        staff_id="ex-1",
+        name="夜間専従さん",
+        role="介護士",
+        night_shift_exclusive=True,
+    )
+    assert allowed_entry_marks(exclusive, Day(date(2026, 9, 1))) == {
+        NIGHT_IN,
+        LATE_NIGHT_IN,
+    }
+
+    # 深夜の枠しか空いていなくても組めること
+    profiles = _staff_with_night_roles() + [exclusive]
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["ex-1"] == {1: LATE_NIGHT_IN}

@@ -225,13 +225,15 @@ def allowed_entry_marks(profile, day) -> set:
         marks.discard(NIGHT_IN)
 
     # 勤務形態の限定。
-    # 「深夜勤務のみ」と「夜勤専従」が両方書かれている人がいる(原文の言い回しの重なり)。
-    # その場合は、より具体的な「深夜勤務のみ」を採る。実物の2026年7月でも
-    # この人は ◉ だけで、○ は1回も無かった。
+    # 施設の担当者の言う「夜勤」は夜間業務のことで、○(夜勤)と◉(深夜)の両方を指す。
+    # だから「夜勤専従」は「夜間専従(日勤なし)」の意味で、○も◉も入る。
+    # 「深夜勤務のみ」はその中の◉だけを名指ししているので、両方書かれていても
+    # 矛盾ではなく、狭い方の「深夜のみ」が効く。
+    # 実物の2026年7月でも、両方書かれているこの人は◉だけで○は1回も無かった。
     if profile.late_night_only:
         marks &= {LATE_NIGHT_IN}
     elif profile.night_shift_exclusive:
-        marks &= {NIGHT_IN}
+        marks &= {NIGHT_IN, LATE_NIGHT_IN}
     elif profile.day_shift_only:
         marks -= {NIGHT_IN, LATE_NIGHT_IN}
     return marks

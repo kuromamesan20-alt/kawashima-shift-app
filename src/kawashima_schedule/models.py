@@ -81,8 +81,11 @@ class StaffProfile:
     is_support_staff: bool = False
     social_insurance: str = ""
     weekly_work_days: Optional[int] = None
+    # 勤務表の記号としては ○(夜勤)と◉(深夜)は別区分だが、
+    # 施設の担当者が条件欄に書く「夜勤」は夜間業務のことで両方を指す。
+    # そのため「夜勤不可」は can_night と can_late_night の両方が False になる。
     can_night: bool = True  # ○(夜勤入り)に入れるか
-    can_late_night: bool = True  # ◉(深夜入り)に入れるか。夜勤とは別区分
+    can_late_night: bool = True  # ◉(深夜入り)に入れるか
     # 入れる日勤帯のコード。既定は全部(日①②③⑤⑦⑨)。
     available_day_shifts: List[str] = field(default_factory=lambda: list(DAY_SHIFT_CODES))
     # 曜日限定で入れない日勤帯。{曜日: [コード]}。
