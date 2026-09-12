@@ -12,6 +12,8 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from ortools.sat.python import cp_model  # noqa: E402
+
 from kawashima_schedule import scheduler as scheduler_module  # noqa: E402
 from kawashima_schedule.calendar_utils import Day  # noqa: E402
 from kawashima_schedule.models import (  # noqa: E402
@@ -427,3 +429,53 @@ def test_同席の回数上限が守られる(monkeypatch):
 
     # ○は毎日この2人しかいないので、3日とも同席になり上限1回を超える
     assert not result.ok, "同席の上限を数えていれば組めないはず"
+
+
+def test_同じ相手と何度も組まないように散らす(monkeypatch):
+    """「同じナースが複数回同席しないように」への対応。
+
+    一緒に入ると負担が増えるため、特定の人に偏ると不満が出る。
+    禁止ではないので、他に組みようが無ければ2回目も入る。
+
+    日数が少ないと ○→△→公 の並びで相手が構造的に決まってしまい、
+    散らす余地が出ない。ここでは「フラグが立っている人にだけ
+    ペナルティ項が作られる」ことを確かめる。実データ3か月での効果は
+    docs/テスト結果 に記録している。
+    """
+    days = [Day(date(2026, 9, day)) for day in range(1, 8)]
+    model = cp_model.CpModel()
+    profiles = _night_pair_staff()
+    x = scheduler_module._create_variables(model, profiles, days)
+
+    without = scheduler_module._add_pair_constraints(model, x, profiles, days)
+    assert without == [], "フラグが無ければペナルティ項は作られない"
+
+    for profile in profiles:
+        if profile.staff_id == "night-2":
+            profile.spread_night_partners = True
+    with_flag = scheduler_module._add_pair_constraints(model, x, profiles, days)
+
+    # 夜間に入れる相手の人数ぶんだけペナルティ項ができる
+    others = [
+        p
+        for p in profiles
+        if p.staff_id != "night-2" and (p.can_night or p.can_late_night)
+    ]
+    assert len(with_flag) == len(others), (
+        f"夜間に入れる相手 {len(others)} 人ぶんのペナルティが要る: {len(with_flag)}"
+    )
+
+
+def test_散らす要望は絶対厳守にしない(monkeypatch):
+    """他に組みようが無ければ2回目も入る。組めなくなってはいけない。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles = _night_pair_staff()
+    for profile in profiles:
+        if profile.staff_id == "night-2":
+            profile.spread_night_partners = True
+
+    result = build_schedule(profiles, requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages

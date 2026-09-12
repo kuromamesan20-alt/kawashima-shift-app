@@ -55,6 +55,12 @@ WEIGHT_NIGHT_AFTER_NIGHT = 200
 
 WEIGHT_LAST_RESORT = 300
 
+# 同じ相手と夜間に2回以上組むことへのペナルティ(1回超過あたり)。
+# 「夜勤は同じナースが複数回同席しないようにして下さい」への対応。
+# 一緒に入ると負担が増えるため、特定の人に偏ると不満が出る。
+# 絶対厳守ではないので、希望出勤(40)より軽く、必要人数より優先はしない。
+WEIGHT_PARTNER_REPEAT = 25
+
 # 深夜(◉)は介護職が8〜9割。看護職で入るのは決まった人だけ。
 # 実物の2026年7月では、看護職の深夜3回はすべて齋藤さんだった。
 NURSES_ALLOWED_ON_LATE_NIGHT = ("齋藤",)
@@ -453,12 +459,16 @@ def _add_monthly_off_quota(model, x, profiles, days) -> None:
 def _add_pair_constraints(model, x, profiles, days) -> List:
     """同席(同じ夜に2人とも夜間の勤務)の制約。絶対厳守。
 
-    戻り値のペナルティ項は今は常に空。
-    「同じナースが複数回同席しないように」という相手を特定しない要望が
-    未実装のため、その受け口として残してある(確認事項には出している)。
+    相手を特定した同席制約(no_pair_night/max_shared_night)は model.Add で
+    絶対厳守として組み込む。「同じナースが複数回同席しないように」という
+    相手を特定しない要望は _spread_night_partners に任せ、そちらのペナルティ項
+    (ソフト制約)を戻り値に含めて返す。
     """
     by_name = {profile.name: profile for profile in profiles}
     penalties: List = []
+    # 同じ(profile, other, day)の組について同席変数を2度作らないよう、
+    # ペア単位(順序を問わない)でキャッシュを共有する。
+    pair_cache: Dict[frozenset, List] = {}
 
     for profile in profiles:
         for constraint in profile.pair_constraints:
@@ -466,24 +476,7 @@ def _add_pair_constraints(model, x, profiles, days) -> List:
             if other is None:
                 continue  # 名簿にいない相手。確認事項として別途出している
 
-            together = []
-            for day in days:
-                both = model.NewBoolVar(f"pair_{profile.staff_id}_{other.staff_id}_{day.day}")
-                # 同じ夜に2人とも夜間の勤務に入っていれば「同席」。
-                # ○が毎晩2人いるので、○と○の組み合わせも同席になる。
-                # 施設の担当者も「夜勤(深夜含む)」と言っており、○◉の別は問わない。
-                a_on = (
-                    x[profile.staff_id, day.day, NIGHT_IN]
-                    + x[profile.staff_id, day.day, LATE_NIGHT_IN]
-                )
-                b_on = (
-                    x[other.staff_id, day.day, NIGHT_IN]
-                    + x[other.staff_id, day.day, LATE_NIGHT_IN]
-                )
-                model.Add(both >= a_on + b_on - 1)
-                model.Add(both <= a_on)
-                model.Add(both <= b_on)
-                together.append(both)
+            together = _together_vars(model, x, profile, other, days, pair_cache)
 
             if constraint.kind == "no_pair_night":
                 for both in together:
@@ -491,6 +484,82 @@ def _add_pair_constraints(model, x, profiles, days) -> List:
             elif constraint.max_count is not None:
                 model.Add(sum(together) <= constraint.max_count)
 
+    penalties += _spread_night_partners(model, x, profiles, days, pair_cache)
+    return penalties
+
+
+def _together_vars(model, x, profile, other, days, cache: Dict[frozenset, List] = None) -> List:
+    """2人が同じ夜に「同席」しているかの 0/1 変数を、日ごとに作る。
+
+    同じ夜に2人とも夜間の勤務に入っていれば同席。
+    ○が毎晩2人いるので、○と○の組み合わせも同席になる。
+    施設の担当者も「夜勤(深夜含む)」と言っており、○◉の別は問わない。
+
+    cache を渡すと、同じペア(順序は問わない)については一度作った変数を
+    再利用する。呼び出し元をまたいで同じ(profile, other)の組が来ても、
+    同名のBoolVarを重複生成しないようにするため。
+    """
+    key = frozenset((profile.staff_id, other.staff_id))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    together = []
+    for day in days:
+        both = model.NewBoolVar(f"pair_{profile.staff_id}_{other.staff_id}_{day.day}")
+        a_on = (
+            x[profile.staff_id, day.day, NIGHT_IN]
+            + x[profile.staff_id, day.day, LATE_NIGHT_IN]
+        )
+        b_on = (
+            x[other.staff_id, day.day, NIGHT_IN]
+            + x[other.staff_id, day.day, LATE_NIGHT_IN]
+        )
+        model.Add(both >= a_on + b_on - 1)
+        model.Add(both <= a_on)
+        model.Add(both <= b_on)
+        together.append(both)
+
+    if cache is not None:
+        cache[key] = together
+    return together
+
+
+def _spread_night_partners(model, x, profiles, days, pair_cache: Dict[frozenset, List] = None) -> List:
+    """夜間に組む相手が特定の人に偏らないようにする。
+
+    「夜勤は同じナースが複数回同席しないようにして下さい」への対応。
+    同じ相手と2回目以降に組むたびにペナルティを付ける。
+    禁止ではないので、他に組みようが無ければ2回目も入る。
+    """
+    penalties: List = []
+    targets = [p for p in profiles if p.spread_night_partners]
+    if not targets:
+        return penalties
+
+    if pair_cache is None:
+        pair_cache = {}
+    # A→B、B→A の両方向で同じペアに二重にペナルティを付けないよう、
+    # 既にペナルティを付けたペアを記録する。
+    penalized_pairs: set = set()
+
+    for profile in targets:
+        for other in profiles:
+            if other.staff_id == profile.staff_id:
+                continue
+            if not (other.can_night or other.can_late_night):
+                continue
+            pair_key = frozenset((profile.staff_id, other.staff_id))
+            if pair_key in penalized_pairs:
+                continue
+            penalized_pairs.add(pair_key)
+
+            together = _together_vars(model, x, profile, other, days, pair_cache)
+            # 2回目以降の回数 = max(0, 同席回数 - 1)
+            excess = model.NewIntVar(
+                0, len(days), f"repeat_{profile.staff_id}_{other.staff_id}"
+            )
+            model.Add(excess >= sum(together) - 1)
+            penalties.append(WEIGHT_PARTNER_REPEAT * excess)
     return penalties
 
 

@@ -115,6 +115,11 @@ class StaffProfile:
     # 休みの日だけ、日責が「可」の人を1人「せ」にする。
     is_head_nurse: bool = False
     pair_constraints: List[PairConstraint] = field(default_factory=list)
+    # 「夜勤は同じナースが複数回同席しないようにして下さい」
+    # 相手を特定しない要望。この人と夜間に組む相手が特定の人に偏らないようにする。
+    # 一緒に入ると負担が増えるため、同じ人に何度も当たると不満が出る、という趣旨。
+    # 絶対厳守ではないのでソフト制約(ペナルティ)として扱う。
+    spread_night_partners: bool = False
     random_days_allowed: bool = False  # 勤務曜日は作成側に一任してよい
     preferred_night: bool = False  # 夜勤・深夜を希望している(ソフト優先度up)
     avoid_early: bool = False  # 早出は本人にやらせていない(ソフト回避)

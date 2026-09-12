@@ -190,6 +190,7 @@ class ConditionParser:
         is_pair_sentence = (
             "同席" in sentence
             or "同じナース" in sentence
+            or "同じ人" in sentence
             or bool(self._find_staff_names(sentence, exclude=profile.name))
         )
         if is_pair_sentence:
@@ -583,6 +584,18 @@ class ConditionParser:
 
     def _parse_pair(self, profile: StaffProfile, sentence: str) -> List[PairConstraint]:
         """同席制約を抽出する。抽出できてもできなくても必ずレビュー対象にする。"""
+        # 「同じナースが複数回同席しないように」は相手を特定しない要望。
+        # 特定の相手との制約ではないので、別のフラグとして扱う。
+        if "同じナース" in sentence or "同じ人" in sentence:
+            profile.spread_night_partners = True
+            profile.flag_review(
+                "夜間に組む相手が特定の人に偏らないようにする、という要望として"
+                f"扱いました(絶対厳守ではなく、できるだけ散らす): 「{sentence}」",
+                code="spread_partners",
+                label=f"{profile.name}/同席の散らし",
+            )
+            return []
+
         others = self._find_staff_names(sentence, exclude=profile.name)
         if not others:
             profile.unparsed_notes.append(f"[同席制約] {sentence}")

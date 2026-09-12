@@ -202,9 +202,20 @@ def test_ordinary_japanese_is_not_mistaken_for_a_name():
     assert profile.day_responsible == "条件付き可"
 
 
-def test_unidentifiable_pair_is_flagged_not_guessed():
+def test_same_nurse_wording_is_treated_as_spread_partners():
+    """「同じナース」の文は相手を特定せず、散らす要望(spread_night_partners)として扱う。"""
     profile = parse(notes="夜勤は同じナースが複数回同席しないようにして下さい。")
     assert profile.pair_constraints == []
+    assert profile.spread_night_partners is True
+    assert any(item.code == "spread_partners" for item in profile.review_items)
+    assert profile.needs_review
+
+
+def test_unidentifiable_pair_is_flagged_not_guessed():
+    """相手を特定できない同席制約は推測せず、確認対象として残す。"""
+    profile = parse(notes="夜勤は山田と同席不可")
+    assert profile.pair_constraints == []
+    assert any(item.code == "pair_unknown" for item in profile.review_items)
     assert profile.needs_review
 
 
