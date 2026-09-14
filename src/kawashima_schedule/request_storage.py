@@ -111,19 +111,30 @@ class GoogleSheetStorage(RequestStorage):
         self.sheet_id = sheet_id
         self.credentials = credentials
         self.worksheet_name = worksheet
+        # 開いたスプレッドシートとシートを覚えておく。
+        # Googleの読み取り回数には上限(1分あたり60回)があり、
+        # 毎回つなぎ直すと画面を触るたびに何回も消費してしまう。
+        self._cached_book = None
+        self._cached_sheets: Dict[str, Any] = {}
 
     def _book(self):
-        import gspread
-        from google.oauth2.service_account import Credentials
+        if self._cached_book is None:
+            import gspread
+            from google.oauth2.service_account import Credentials
 
-        creds = Credentials.from_service_account_info(self.credentials, scopes=SCOPES)
-        return gspread.authorize(creds).open_by_key(self.sheet_id)
+            creds = Credentials.from_service_account_info(self.credentials, scopes=SCOPES)
+            self._cached_book = gspread.authorize(creds).open_by_key(self.sheet_id)
+        return self._cached_book
 
     def _sheet(self, name: str, header: List[str], create: bool = True):
         """名前でシートを取り、見出しを整える。
 
         create=False のときは、無ければ None を返す(まだ用意していない状態)。
+        一度取れたシートは覚えておき、つなぎ直さない。
         """
+        if name in self._cached_sheets:
+            return self._cached_sheets[name]
+
         book = self._book()
         try:
             sheet = book.worksheet(name)
@@ -133,9 +144,13 @@ class GoogleSheetStorage(RequestStorage):
                 return None
             sheet = book.add_worksheet(name, rows=2000, cols=len(header))
             sheet.update("A1", [header])
+            self._cached_sheets[name] = sheet
             return sheet
+
+        # 見出しの確認は、そのシートにつき1回だけでよい
         if sheet.row_values(1) != header:
             sheet.update("A1", [header])
+        self._cached_sheets[name] = sheet
         return sheet
 
     def _worksheet(self):

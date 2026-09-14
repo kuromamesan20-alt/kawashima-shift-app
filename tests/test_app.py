@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import app  # noqa: E402
 from kawashima_schedule.calendar_utils import month_days  # noqa: E402
 from kawashima_schedule.models import StaffProfile  # noqa: E402
+from kawashima_schedule.request_sheet import StaffRequests  # noqa: E402
 
 
 def test_from_frame_distinguishes_same_name_staff_by_id():
@@ -159,3 +160,114 @@ def _capture_errors(monkeypatch) -> list:
     errors: list = []
     monkeypatch.setattr(app.st, "error", lambda message, *a, **k: errors.append(message))
     return errors
+
+
+# --- スプレッドシートの読み取り回数 ------------------------------------------------
+
+
+class _CountingStorage:
+    """呼ばれた回数を数えるだけの偽の保存先。"""
+
+    def __init__(self):
+        self.profile_calls = 0
+        self.load_calls = 0
+        self.stored: dict = {}
+
+    def load_profiles(self):
+        self.profile_calls += 1
+        return [StaffProfile(staff_id="id-1", name="佐藤")]
+
+    def load(self, year, month):
+        self.load_calls += 1
+        return list(self.stored.get((year, month), []))
+
+    def save(self, year, month, requests):
+        self.stored[(year, month)] = list(requests)
+
+
+def _clear_caches() -> None:
+    app._fetch_staff.clear()
+    app._saved_requests.clear()
+
+
+def test_staff_is_read_only_once_no_matter_how_many_reruns():
+    """画面が何度作り直されても、スタッフ情報は1回しか読まないこと。
+
+    Streamlit はマスを1つ触るたびに画面全体を作り直す。毎回読みに行くと
+    Googleの上限(1分60回)に達して「Quota exceeded」で入力が止まる。
+    実際にその不具合が起きたので、回数を固定しておく。
+    """
+    _clear_caches()
+    storage = _CountingStorage()
+
+    for _ in range(20):
+        app._fetch_staff(storage, "key")
+
+    assert storage.profile_calls == 1
+
+
+def test_saved_requests_are_read_only_once():
+    _clear_caches()
+    storage = _CountingStorage()
+
+    for _ in range(20):
+        app._saved_requests(storage, 2026, 10)
+
+    assert storage.load_calls == 1
+
+
+def test_a_different_month_is_read_separately():
+    """月を切り替えたら、その月の希望はちゃんと読み直すこと。"""
+    _clear_caches()
+    storage = _CountingStorage()
+
+    app._saved_requests(storage, 2026, 10)
+    app._saved_requests(storage, 2026, 11)
+
+    assert storage.load_calls == 2
+
+
+def test_clearing_the_cache_reads_again():
+    """「最新に更新」を押したら読み直すこと。"""
+    _clear_caches()
+    storage = _CountingStorage()
+
+    app._fetch_staff(storage, "key")
+    _clear_caches()
+    app._fetch_staff(storage, "key")
+
+    assert storage.profile_calls == 2
+
+
+def test_saving_then_reading_gives_the_new_content():
+    """保存した直後に読むと、保存した内容が返ること。
+
+    覚えた内容を捨て忘れると、保存したのに古い内容が表示される。
+    「Quota exceeded」より厄介な不具合なので、ここで止める。
+    """
+    _clear_caches()
+    storage = _CountingStorage()
+
+    # 1回読んで覚えさせる(この時点では空)
+    assert app._saved_requests(storage, 2026, 10) == []
+
+    # 保存する。画面側は保存のあと必ず覚えた分を捨てる
+    storage.save(2026, 10, [StaffRequests(staff_id="id-1", name="佐藤", entries={3: "公"})])
+    app._saved_requests.clear()
+
+    after = app._saved_requests(storage, 2026, 10)
+    assert [r.entries for r in after] == [{3: "公"}], "保存した内容が返ること"
+
+
+def test_wish_page_clears_the_cache_after_saving():
+    """保存の処理に「覚えた分を捨てる」が書かれていること。
+
+    書き忘れると上のテストが通っていても実際の画面では古い内容が出る。
+    保存とキャッシュ削除が離れて書かれている間は、この見張りが要る。
+    """
+    import inspect
+
+    source = inspect.getsource(app._wish_page)
+    save_at = source.index("storage.save(")
+    clear_at = source.index("_saved_requests.clear()")
+    assert clear_at > save_at, "保存したあとに、覚えた分を捨てること"

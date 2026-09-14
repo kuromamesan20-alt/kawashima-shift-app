@@ -207,3 +207,98 @@ def test_local_profiles_round_trip(tmp_path):
     assert loaded["id-2"].unit == "ばら"
     assert loaded["id-2"].leave_from == "2026-09"
     assert loaded["id-2"].is_on_leave(2026, 10) is True
+
+
+# --- 接続の使い回し --------------------------------------------------------------
+
+
+class _FakeSheet:
+    """gspread のシートのふり。呼ばれた回数を数える。"""
+
+    def __init__(self, header):
+        self.header = header
+        self.row_values_calls = 0
+
+    def row_values(self, index):
+        self.row_values_calls += 1
+        return self.header
+
+    def get_all_records(self):
+        return []
+
+    def update(self, *args, **kwargs):
+        pass
+
+
+class _FakeBook:
+    def __init__(self, header):
+        self.sheet = _FakeSheet(header)
+        self.worksheet_calls = 0
+
+    def worksheet(self, name):
+        self.worksheet_calls += 1
+        return self.sheet
+
+
+class _FakeCredentials:
+    @classmethod
+    def from_service_account_info(cls, info, scopes=None):
+        return cls()
+
+
+class _FakeClient:
+    def __init__(self, book):
+        self._book = book
+
+    def open_by_key(self, sheet_id):
+        return self._book
+
+
+def _storage_with_fake_book(monkeypatch):
+    """認証と接続の部分だけ差し替えたストレージを返す。
+
+    _book() 自体は本番のまま動かすことで、キャッシュの再利用ロジック
+    (if self._cached_book is None: ...)を実際に検証する。
+    """
+    import gspread
+
+    from kawashima_schedule import request_storage as module
+
+    storage = module.GoogleSheetStorage("sheet-id", {}, worksheet="requests")
+    book = _FakeBook(module.HEADER)
+    opened = {"count": 0}
+
+    def fake_authorize(creds):
+        opened["count"] += 1
+        return _FakeClient(book)
+
+    monkeypatch.setattr(gspread, "authorize", fake_authorize)
+    monkeypatch.setattr(
+        "google.oauth2.service_account.Credentials", _FakeCredentials
+    )
+    return storage, book, opened
+
+
+def test_spreadsheet_is_opened_only_once(monkeypatch):
+    """同じストレージで何度読んでも、つなぎ直さないこと。
+
+    毎回つなぎ直すと、画面を触るたびにGoogleの読み取り回数を消費し、
+    1分あたりの上限(60回)にすぐ達してしまう。
+    """
+    storage, _book, opened = _storage_with_fake_book(monkeypatch)
+
+    for _ in range(10):
+        storage.load(2026, 10)
+
+    assert opened["count"] == 1, "スプレッドシートを開くのは1回だけでよい"
+
+
+def test_header_is_checked_only_once(monkeypatch):
+    """見出し行の確認も、シートにつき1回だけにすること。"""
+    storage, book, _opened = _storage_with_fake_book(monkeypatch)
+
+    for _ in range(10):
+        storage.load(2026, 10)
+
+    assert book.sheet.row_values_calls == 1
+    assert book.worksheet_calls == 1

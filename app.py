@@ -129,19 +129,15 @@ def _wish_page() -> None:
     st.title("希望休・希望出勤の入力")
 
     storage = get_storage(_secrets(), PROFILES_PATH.parent)
-    status = storage.status()
+    status = _cached_status(storage)
 
-    # スタッフ情報は保存先(スプレッドシート)から読む。
-    # 個人情報なのでGitHubには置かないため、手元のファイルは予備。
-    profiles = None
     try:
-        profiles = storage.load_profiles()
+        profiles = _staff(storage)
     except Exception as error:
         st.error("スタッフ情報の読み込みに失敗しました。")
         st.exception(error)
+        _refresh_button()
         return
-    if not profiles:
-        profiles = _load_profiles()
     if not profiles:
         st.error("スタッフ情報がまだ登録されていません。")
         st.markdown(
@@ -156,14 +152,14 @@ def _wish_page() -> None:
 
     st.caption(f"保存先: {status.provider} — {status.message}")
 
-    saved = {r.staff_id: r for r in storage.load(year, month)}
+    saved = {r.staff_id: r for r in _saved_requests(storage, year, month)}
     days = month_days(year, month)
 
     st.subheader(f"{month_label(year, month)}（スタッフ {len(active)} 名）")
     _show_legend()
 
     edited = st.data_editor(
-        _to_frame(active, days, saved),
+        _editor_frame(active, days, saved, year, month),
         use_container_width=True,
         height=min(760, 80 + 36 * len(active)),
         column_config=_column_config(days),
@@ -173,12 +169,17 @@ def _wish_page() -> None:
         key=f"editor-{year}-{month}-v4",
     )
 
-    left, right = st.columns([1, 4])
+    left, middle, right = st.columns([1, 1, 3])
     if left.button("保存する", type="primary"):
         requests = _from_frame(edited, active, days)
         storage.save(year, month, requests)
+        # 保存した内容が次の表示に反映されるよう、覚えていた分を捨てる
+        _saved_requests.clear()
+        st.session_state.pop(_frame_key(year, month), None)
         filled = sum(len(r.entries) for r in requests)
         right.success(f"保存しました（{filled} 件の希望）")
+    with middle:
+        _refresh_button()
 
     _show_summary(edited, days)
 
@@ -189,17 +190,18 @@ def _build_page() -> None:
 
     storage = get_storage(_secrets(), PROFILES_PATH.parent)
     try:
-        profiles = storage.load_profiles() or _load_profiles()
+        profiles = _staff(storage)
     except Exception as error:
         st.error("スタッフ情報の読み込みに失敗しました。")
         st.exception(error)
+        _refresh_button()
         return
     if not profiles:
         st.error("スタッフ情報がまだ登録されていません。")
         return
 
     year, month = _pick_month(key="build")
-    requests = storage.load(year, month)
+    requests = _saved_requests(storage, year, month)
     filled = [r for r in requests if r.entries]
 
     st.write(
@@ -254,6 +256,74 @@ def _to_excel_bytes(result, profiles) -> bytes:
         path = Path(folder) / "schedule.xlsx"
         export_schedule(result, profiles, path)
         return path.read_bytes()
+
+
+# --- スプレッドシートの読み取りを減らす ---------------------------------------
+#
+# Streamlit はマスを1つ触るたびに画面全体を作り直す。そのたびに読みに行くと、
+# 1操作あたり数回のAPI呼び出しになり、Googleの上限(1分あたり60回)にすぐ達する。
+# 実際に「Quota exceeded」で入力が止まる不具合が起きた。
+#
+# そこで一度読んだ内容は覚えておき、操作中はAPIを叩かないようにする。
+# 覚えた内容を捨てるのは次の2つのときだけ:
+#   - 「保存する」を押したとき(自分が書き換えたので読み直す)
+#   - 「最新に更新」を押したとき(スプレッドシートを直接直した場合)
+
+
+@st.cache_data(show_spinner="スタッフ情報を読んでいます...")
+def _fetch_staff(_storage, cache_key: str):
+    """スタッフ情報をスプレッドシートから読む。結果は覚えておく。
+
+    _storage は先頭にアンダースコアを付けて、Streamlit の照合対象から外す
+    (接続オブジェクトは比較できないため)。かわりに cache_key で区別する。
+    """
+    return _storage.load_profiles()
+
+
+@st.cache_data(show_spinner="希望を読んでいます...")
+def _saved_requests(_storage, year: int, month: int):
+    """その月の保存済みの希望を読む。結果は覚えておく。"""
+    return _storage.load(year, month)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_status(_storage):
+    """保存先の状態。画面の上に出すだけなので、毎回問い合わせない。"""
+    return _storage.status()
+
+
+def _staff(storage):
+    """スタッフ情報。スプレッドシートに無ければ手元のファイルを使う。"""
+    profiles = _fetch_staff(storage, str(type(storage)))
+    return profiles or _load_profiles()
+
+
+def _refresh_button() -> None:
+    """スプレッドシートを直接直したときに、画面へ反映させるボタン。"""
+    if st.button("最新に更新", help="スプレッドシートを直接直したときに押してください"):
+        _fetch_staff.clear()
+        _saved_requests.clear()
+        _cached_status.clear()
+        _load_profiles.clear()
+        for key in [k for k in st.session_state if str(k).startswith("frame-")]:
+            del st.session_state[key]
+        st.rerun()
+
+
+def _frame_key(year: int, month: int) -> str:
+    return f"frame-{year}-{month}"
+
+
+def _editor_frame(profiles, days, saved, year: int, month: int):
+    """入力欄に渡す表。一度作ったら使い回す。
+
+    画面が作り直されるたびに新しい表を渡すと、入力したばかりの内容が
+    捨てられて「1回目が反映されない」ことがある。同じ表を渡し続ける。
+    """
+    key = _frame_key(year, month)
+    if key not in st.session_state:
+        st.session_state[key] = _to_frame(profiles, days, saved)
+    return st.session_state[key]
 
 
 # --- 部品 ---------------------------------------------------------------------
