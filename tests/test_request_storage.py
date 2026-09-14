@@ -302,3 +302,40 @@ def test_header_is_checked_only_once(monkeypatch):
 
     assert book.sheet.row_values_calls == 1
     assert book.worksheet_calls == 1
+
+
+# --- _sheet() の例外の扱い --------------------------------------------------------
+
+
+class _BookRaisingOnWorksheet:
+    """worksheet() が指定した例外を投げるだけの偽物。"""
+
+    def __init__(self, error):
+        self.error = error
+
+    def worksheet(self, name):
+        raise self.error
+
+
+def test_sheet_returns_none_when_worksheet_is_missing(monkeypatch):
+    """create=False のとき、シートが無ければ(WorksheetNotFound)None を返すこと。"""
+    import gspread
+
+    storage = GoogleSheetStorage("sheet-id", {})
+    book = _BookRaisingOnWorksheet(gspread.WorksheetNotFound("no such sheet"))
+    monkeypatch.setattr(storage, "_book", lambda: book)
+
+    assert storage._sheet("staff_profiles", ["a"], create=False) is None
+
+
+def test_sheet_does_not_swallow_unrelated_errors(monkeypatch):
+    """429などの一時的な通信エラーを「シートが無い」と誤判定しないこと。
+
+    WorksheetNotFound 以外の例外は、そのまま上に投げること。
+    """
+    storage = GoogleSheetStorage("sheet-id", {})
+    book = _BookRaisingOnWorksheet(RuntimeError("Quota exceeded (テスト用)"))
+    monkeypatch.setattr(storage, "_book", lambda: book)
+
+    with pytest.raises(RuntimeError, match="Quota exceeded"):
+        storage._sheet("staff_profiles", ["a"], create=False)

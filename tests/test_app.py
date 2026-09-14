@@ -259,6 +259,50 @@ def test_saving_then_reading_gives_the_new_content():
     assert [r.entries for r in after] == [{3: "公"}], "保存した内容が返ること"
 
 
+def test_staff_cache_key_differs_by_storage_destination():
+    """保存先(スプレッドシートID)が違えば、キャッシュキーも違うこと。
+
+    クラス名だけだと、別のスプレッドシートに切り替えても
+    古いスタッフ情報がキャッシュから返り続けてしまう。
+    """
+    from kawashima_schedule.request_storage import GoogleSheetStorage, LocalStorage
+
+    storage_a = GoogleSheetStorage("sheet-aaa", {})
+    storage_b = GoogleSheetStorage("sheet-bbb", {})
+    local = LocalStorage(Path("/tmp/dummy"))
+
+    assert app._storage_cache_key(storage_a) != app._storage_cache_key(storage_b)
+    assert app._storage_cache_key(storage_a) != app._storage_cache_key(local)
+
+
+def test_cached_status_is_read_separately_per_storage_destination():
+    """保存先ごとにstatus()を読み直すこと(1プロセスで固定にしない)。"""
+    _clear_status_cache()
+
+    class _CountingStorage2:
+        def __init__(self, sheet_id):
+            self.sheet_id = sheet_id
+            self.calls = 0
+
+        def status(self):
+            self.calls += 1
+            return f"status-{self.sheet_id}"
+
+    storage_a = _CountingStorage2("aaa")
+    storage_b = _CountingStorage2("bbb")
+
+    key_a = app._storage_cache_key(storage_a)
+    key_b = app._storage_cache_key(storage_b)
+    assert app._cached_status(storage_a, key_a) == "status-aaa"
+    assert app._cached_status(storage_b, key_b) == "status-bbb"
+    assert storage_a.calls == 1
+    assert storage_b.calls == 1
+
+
+def _clear_status_cache() -> None:
+    app._cached_status.clear()
+
+
 def test_wish_page_clears_the_cache_after_saving():
     """保存の処理に「覚えた分を捨てる」が書かれていること。
 

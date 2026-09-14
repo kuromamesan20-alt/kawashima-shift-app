@@ -129,7 +129,7 @@ def _wish_page() -> None:
     st.title("希望休・希望出勤の入力")
 
     storage = get_storage(_secrets(), PROFILES_PATH.parent)
-    status = _cached_status(storage)
+    status = _cached_status(storage, _storage_cache_key(storage))
 
     try:
         profiles = _staff(storage)
@@ -270,6 +270,16 @@ def _to_excel_bytes(result, profiles) -> bytes:
 #   - 「最新に更新」を押したとき(スプレッドシートを直接直した場合)
 
 
+def _storage_cache_key(storage) -> str:
+    """保存先を一意に区別するキー。
+
+    クラス名だけだと、Googleスプレッドシートを別のものに切り替えても
+    同じキーとみなされ、古いスタッフ情報がキャッシュから返り続けてしまう。
+    保存先そのもの(スプレッドシートID、無ければ"local")を含める。
+    """
+    return f"{type(storage).__name__}:{getattr(storage, 'sheet_id', 'local')}"
+
+
 @st.cache_data(show_spinner="スタッフ情報を読んでいます...")
 def _fetch_staff(_storage, cache_key: str):
     """スタッフ情報をスプレッドシートから読む。結果は覚えておく。
@@ -287,14 +297,17 @@ def _saved_requests(_storage, year: int, month: int):
 
 
 @st.cache_data(show_spinner=False)
-def _cached_status(_storage):
-    """保存先の状態。画面の上に出すだけなので、毎回問い合わせない。"""
+def _cached_status(_storage, cache_key: str):
+    """保存先の状態。画面の上に出すだけなので、毎回問い合わせない。
+
+    cache_key で保存先を区別する(理由は _storage_cache_key を参照)。
+    """
     return _storage.status()
 
 
 def _staff(storage):
     """スタッフ情報。スプレッドシートに無ければ手元のファイルを使う。"""
-    profiles = _fetch_staff(storage, str(type(storage)))
+    profiles = _fetch_staff(storage, _storage_cache_key(storage))
     return profiles or _load_profiles()
 
 
@@ -321,6 +334,9 @@ def _editor_frame(profiles, days, saved, year: int, month: int):
     捨てられて「1回目が反映されない」ことがある。同じ表を渡し続ける。
     """
     key = _frame_key(year, month)
+    # 表示していない月の表は捨てる。月を切り替えるたびに溜まらないようにする。
+    for stale in [k for k in st.session_state if str(k).startswith("frame-") and k != key]:
+        del st.session_state[stale]
     if key not in st.session_state:
         st.session_state[key] = _to_frame(profiles, days, saved)
     return st.session_state[key]

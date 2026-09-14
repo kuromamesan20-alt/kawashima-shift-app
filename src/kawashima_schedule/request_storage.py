@@ -135,10 +135,12 @@ class GoogleSheetStorage(RequestStorage):
         if name in self._cached_sheets:
             return self._cached_sheets[name]
 
+        import gspread
+
         book = self._book()
         try:
             sheet = book.worksheet(name)
-        except Exception:
+        except gspread.WorksheetNotFound:
             # シートが無い場合。作る指定でなければ「未設定」として None
             if not create:
                 return None
