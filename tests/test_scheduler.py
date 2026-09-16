@@ -356,7 +356,7 @@ def test_番号のシフトに合わない勤務時間は時間をそのまま�
 
 
 def test_時短や日勤は選ばれたものをそのまま書く(monkeypatch):
-    """「日勤または時短9-16時、8-15時など」の人は、その日どれで入るか選べる。
+    """時短の時間が複数ある人は、その日どれで入るか選べる。
 
     以前は何を選んでも work_hours の1パターンだけが入っていた。
     """
@@ -370,7 +370,7 @@ def test_時短や日勤は選ばれたものをそのまま書く(monkeypatch):
         can_late_night=False,
         work_hours=("08:00", "15:00"),
     )
-    for chosen in ("日", "9-16時", "8-15時"):
+    for chosen in ("日", "9-16時", "9-15時"):
         part = StaffProfile(staff_id="part-1", name="時間パートさん", **base)
         wish = StaffRequests(
             staff_id="part-1", name="時間パートさん", entries={1: chosen}
