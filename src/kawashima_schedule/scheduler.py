@@ -32,6 +32,7 @@ from .shifts import (
     EARLY_SHIFTS,
     HOUR_CHOICES,
     LATE_NIGHT_IN,
+    LATE_SHIFTS,
     NIGHT_AFTER,
     NIGHT_IN,
     OFF,
@@ -157,6 +158,8 @@ def build_schedule(
     _add_monthly_off_quota(model, x, solver_profiles, days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_max_consecutive_work(model, x, solver_profiles, days)
+    _add_rest_after_late_shift(model, x, solver_profiles, days)
+    _add_request_only_days(model, x, solver_profiles, days, by_staff_request)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
     se = _add_responsible(model, x, solver_profiles, days, result)
 
@@ -514,6 +517,59 @@ def _has_own_schedule(profile) -> bool:
     「6時から17時迄の枠」と書かれた常勤まで外れてしまう。
     """
     return bool(profile.fixed_time_slots or profile.is_support_staff)
+
+
+def _add_rest_after_late_shift(model, x, profiles, days) -> None:
+    """遅番の翌日に早出と「日」を入れない。
+
+    施設の担当者のご要望:
+      「⑤⑦⑨遅番の次の日は①②③早出と日は付けない」
+
+    日⑤(11-19) 日⑦(13-21) 日⑨(12:30-20:30) の翌日に
+    日①(6:00開始) 日②(7:00) 日③(8:00) 日(9:00) を割り当てない。
+    遅くまで働いた翌朝に早い勤務が来ないようにする、勤務間の間隔の確保。
+
+    翌日に残るのは 遅番・夜勤・深夜・公休・有給など。
+    """
+    forbidden_next = tuple(EARLY_SHIFTS) + ("日③", "日")
+    day_numbers = [day.day for day in days]
+
+    for profile in profiles:
+        if _has_own_schedule(profile):
+            continue
+        for index, day in enumerate(day_numbers[:-1]):
+            tomorrow = day_numbers[index + 1]
+            for late in LATE_SHIFTS:
+                for early in forbidden_next:
+                    # 遅番と、翌日の早い勤務は同時に成り立たない
+                    model.AddAtMostOne(
+                        [
+                            x[profile.staff_id, day, late],
+                            x[profile.staff_id, tomorrow, early],
+                        ]
+                    )
+
+
+def _add_request_only_days(model, x, profiles, days, by_staff_request) -> None:
+    """「希望した日のみ、勤務します」の方を、希望の入っている日だけ勤務にする。
+
+    希望出勤が入っていない日は公休にする。
+    この方たちの勤務日は、毎月の希望入力がそのまま決める。
+    """
+    for profile in profiles:
+        if not profile.works_only_on_request or _has_own_schedule(profile):
+            continue
+        request = by_staff_request.get(profile.staff_id) or _NO_REQUEST
+        wanted = set(request.wish_work_days())
+        # 有給・研修などもその日を占めるので、勤務日とは別に残す
+        occupied = wanted | set(request.absence_days())
+        for day in days:
+            if day.day in occupied:
+                continue
+            # 夜勤の翌日の明け(△)だけは、前日の夜勤から必ず続くので許す
+            for mark in ALL_MARKS:
+                if mark not in (OFF, NIGHT_AFTER):
+                    model.Add(x[profile.staff_id, day.day, mark] == 0)
 
 
 def _add_max_consecutive_work(model, x, profiles, days) -> None:

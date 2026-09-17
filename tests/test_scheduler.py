@@ -890,3 +890,132 @@ def test_前月からの勤務は希望休より優先する(monkeypatch):
 
     assert result.ok, result.messages
     assert result.assignments[nurse.staff_id][1] == NIGHT_AFTER
+
+
+# --- 遅番の翌日 / 希望した日のみ勤務 ----------------------------------------------
+
+
+def _roster_for_a_few_days() -> List[StaffProfile]:
+    """数日ぶん回せる人員。
+
+    _coverage_staff は1日ぶんをちょうど満たすだけなので、複数日だと
+    夜勤の3日セット(○→△→公)が回らず組めなくなる。
+    夜勤は1人が3日に1回しか入れないので、毎日2人ぶん埋めるには6人要る。
+    深夜は ◉→公 の2日セットなので2人。
+    """
+    staff: List[StaffProfile] = []
+    for index, code in enumerate(REQUIRED_DAY_SHIFTS, 1):
+        staff.append(
+            StaffProfile(
+                staff_id=f"day-{index}",
+                name=f"日勤{index}",
+                role="介護士",
+                available_day_shifts=[code],
+                can_night=False,
+                can_late_night=False,
+            )
+        )
+    # 夜勤は看護1人+介護1人で組むので、3組ぶん用意する
+    for index in range(1, 7):
+        staff.append(
+            StaffProfile(
+                staff_id=f"night-{index}",
+                name=f"夜勤{index}",
+                role="看護師" if index % 2 else "介護士",
+                available_day_shifts=[],
+                can_night=True,
+                can_late_night=False,
+            )
+        )
+    for index in range(1, 3):
+        staff.append(
+            StaffProfile(
+                staff_id=f"latenight-{index}",
+                name=f"深夜{index}",
+                role="介護士",
+                available_day_shifts=[],
+                can_night=False,
+                can_late_night=True,
+            )
+        )
+    return staff
+
+
+def test_遅番の翌日に早出と日を入れない(monkeypatch):
+    """「⑤⑦⑨遅番の次の日は①②③早出と日は付けない」
+
+    遅くまで働いた翌朝に早い勤務が来ないようにする、勤務間の間隔の確保。
+    日⑦(13-21)に入った翌日は、日①②③や「日」に入れない。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2)],
+    )
+    # 遅番にも早出にも入れる人。1日に日⑦を希望している。
+    both = StaffProfile(
+        staff_id="both-1",
+        name="遅番も早出もさん",
+        role="介護士",
+        available_day_shifts=["日⑦", "日①", "日"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="both-1", name="遅番も早出もさん", entries={1: "日⑦"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [both], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["both-1"]
+    assert assignment[1] == "日⑦", "希望どおり遅番に入る"
+    assert assignment[2] not in ("日①", "日②", "日③", "日"), (
+        f"遅番の翌日に{assignment[2]}が入っている"
+    )
+
+
+def test_希望した日のみ勤務の人は希望以外の日に入らない(monkeypatch):
+    """「希望した日のみ、勤務します」の方は、希望が無い日は公休。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2, 3)]
+    )
+    only = StaffProfile(
+        staff_id="only-1",
+        name="希望だけさん",
+        role="介護士",
+        works_only_on_request=True,
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="only-1", name="希望だけさん", entries={2: "日"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["only-1"]
+    assert assignment[2] == "日", "希望した日には入る"
+    assert assignment[1] == "公", "希望が無い日は公休"
+    assert assignment[3] == "公", "希望が無い日は公休"
+
+
+def test_希望した日のみ勤務でも有給はその日を占める(monkeypatch):
+    """有給などの「勤務しない」希望も、公休とは別にその日に残ること。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2)]
+    )
+    only = StaffProfile(
+        staff_id="only-2",
+        name="希望だけさん",
+        role="介護士",
+        works_only_on_request=True,
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="only-2", name="希望だけさん", entries={1: "有"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert result.assignments["only-2"][1] == "有"

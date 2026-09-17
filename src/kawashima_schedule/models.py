@@ -126,6 +126,12 @@ class StaffProfile:
     # 絶対厳守ではないのでソフト制約(ペナルティ)として扱う。
     spread_night_partners: bool = False
     random_days_allowed: bool = False  # 勤務曜日は作成側に一任してよい
+    # 「希望した日のみ、勤務します」の方。
+    # 希望出勤に入っていない日は勤務に入れない(公休にする)。
+    # 逆に言えば、この方の勤務日は毎月の希望入力がそのまま決める。
+    # 希望が1件も無い月は1か月すべて公休になるが、それが正しい姿なので
+    # 「1か月すべて公休」の知らせは出さない。
+    works_only_on_request: bool = False
     preferred_night: bool = False  # 夜勤・深夜を希望している(ソフト優先度up)
     avoid_early: bool = False  # 早出は本人にやらせていない(ソフト回避)
     # 「できるだけ避けたい日勤帯」。入れないわけではなく、他の人で埋まらないときだけ使う。
