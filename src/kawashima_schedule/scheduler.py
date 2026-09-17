@@ -1052,6 +1052,13 @@ def _move_out_unworkable(
                 f"勤務時間({profile.work_hours[0]}-{profile.work_hours[1]})を"
                 f"そのまま入れました(勤務{worked}日{absence_note})"
             )
+        elif profile.works_only_on_request:
+            # 「希望した日のみ勤務」の方は、希望が無ければ全部公休が正しい姿。
+            # 予定を出せる時期が不定期な方もいるので、知らせにはしない。
+            result.messages.append(
+                f"{profile.name}: 希望した日のみ勤務される方で、"
+                "この月の希望出勤が入っていないため、すべて公休にしました"
+            )
         elif profile.work_hours:
             result.messages.append(
                 f"{ALERT_MARK} {profile.name}: 勤務時間"

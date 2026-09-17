@@ -1053,3 +1053,60 @@ def test_希望した日のみ勤務でも前月末からの夜勤は引き継�
     assignment = result.assignments["only-3"]
     assert assignment[1] == "△", "前月末の夜勤から続く明けが消えてはいけない"
     assert assignment[2] == "公", "明けの翌日は公休"
+
+
+def test_希望した日のみ勤務の人は希望が無くても要確認にしない(monkeypatch):
+    """予定を出せる時期が不定期な方がいる。
+
+    希望が無ければ全部公休が正しい姿なので、★要確認にはしない。
+    知らせ自体は出すが、見落とすと困るものではないので印は付けない。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2)],
+    )
+    only = StaffProfile(
+        staff_id="only-4",
+        name="不定期さん",
+        role="介護士",
+        works_only_on_request=True,
+        work_hours=("08:00", "15:00"),
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    mine = [m for m in result.messages if "不定期さん" in m]
+    assert mine, "何も知らせないのではなく、状況は伝える"
+    assert not any(m.startswith(ALERT_MARK) for m in mine), (
+        "希望が無いのが正しい姿なので、★要確認にはしない"
+    )
+
+
+def test_希望した日のみでない人が全部公休なら要確認にする(monkeypatch):
+    """こちらは見落とすと困るので、印を付けたまま残す。"""
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2)],
+    )
+    stuck = StaffProfile(
+        staff_id="stuck-1",
+        name="入れる勤務が無いさん",
+        role="介護士",
+        work_hours=("08:00", "15:00"),
+        available_day_shifts=[],
+        can_night=False,
+        can_late_night=False,
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [stuck], requests=[], year=2026, month=9
+    )
+
+    mine = [m for m in result.messages if "入れる勤務が無いさん" in m]
+    assert any(m.startswith(ALERT_MARK) for m in mine), mine
