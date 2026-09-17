@@ -539,15 +539,13 @@ def _add_rest_after_late_shift(model, x, profiles, days) -> None:
             continue
         for index, day in enumerate(day_numbers[:-1]):
             tomorrow = day_numbers[index + 1]
-            for late in LATE_SHIFTS:
-                for early in forbidden_next:
-                    # 遅番と、翌日の早い勤務は同時に成り立たない
-                    model.AddAtMostOne(
-                        [
-                            x[profile.staff_id, day, late],
-                            x[profile.staff_id, tomorrow, early],
-                        ]
-                    )
+            # 「今日の遅番」と「翌日の早い勤務」を合わせて1つまで。
+            # 組ごとに書くより制約が少なく済む(1日あたり12本 → 1本)。
+            model.Add(
+                sum(x[profile.staff_id, day, late] for late in LATE_SHIFTS)
+                + sum(x[profile.staff_id, tomorrow, early] for early in forbidden_next)
+                <= 1
+            )
 
 
 def _add_request_only_days(model, x, profiles, days, by_staff_request) -> None:

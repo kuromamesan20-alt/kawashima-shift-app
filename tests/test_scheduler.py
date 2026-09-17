@@ -1019,3 +1019,37 @@ def test_希望した日のみ勤務でも有給はその日を占める(monkeyp
 
     assert result.ok, result.messages
     assert result.assignments["only-2"][1] == "有"
+
+
+def test_希望した日のみ勤務でも前月末からの夜勤は引き継ぐ(monkeypatch):
+    """前月末が○だった方は、希望が無くても1日目が明け(△)、2日目が公休になること。
+
+    「希望した日のみ勤務」で全部公休にしてしまうと、
+    前月末の夜勤から続く明けが消えて、前月の勤務表と食い違う。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2)],
+    )
+    only = StaffProfile(
+        staff_id="only-3",
+        name="前月末が夜勤さん",
+        role="介護士",
+        works_only_on_request=True,
+        can_night=True,
+        can_late_night=False,
+        available_day_shifts=[],
+    )
+    # 前月末(0日)が○。今月の希望は1件も無い。
+    carry = StaffRequests(
+        staff_id="only-3", name="前月末が夜勤さん", entries={CARRY_OVER_DAY: "○"}
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[carry], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["only-3"]
+    assert assignment[1] == "△", "前月末の夜勤から続く明けが消えてはいけない"
+    assert assignment[2] == "公", "明けの翌日は公休"

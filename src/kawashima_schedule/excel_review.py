@@ -86,6 +86,7 @@ _COLUMNS: List[Tuple[str, Optional[str], int, bool, Optional[Sequence[str]]]] = 
     ("夜勤・深夜を希望", "preferred_night", 12, True, (_YES, _NO)),
     ("早出は避ける", "avoid_early", 12, True, (_YES, _NO)),
     ("曜日おまかせ可", "random_days_allowed", 12, True, (_YES, _NO)),
+    ("希望した日のみ勤務", "works_only_on_request", 14, True, (_YES, _NO)),
     ("自動で読めなかった文", "_unparsed", 34, False, None),
     ("確認してほしいこと", "_reasons", 46, False, None),
     ("お客様のご回答", "_customer_answers", 46, False, None),
@@ -122,6 +123,7 @@ _LEGEND = [
     ("休職開始(年月)", "2026-09 のように入れると、その月以降は勤務表に入りません。復職したら空欄に戻します"),
     ("ユニット", "ばら / さくら / ゆり / すみれ のどれか。師長と介護補助は空欄"),
     ("介護補助", "環境整備や物品補充の方。日勤帯の人数にも夜勤の輪番にも入りません"),
+    ("希望した日のみ勤務", "「はい」にすると、希望出勤が入っている日だけ勤務します。入っていない日は公休です"),
     ("曜日限定で入れないシフト", "火=日①/日②・水=日①/日② (その曜日だけ入れないシフト)"),
     ("", "師長が休みの日は、日勤責任者が「可」の人を1人、責任者(「せ」)として立てます"),
     ("", ""),
@@ -256,6 +258,7 @@ def _cell_value(profile: StaffProfile, attr: Optional[str]) -> Any:
         "is_head_nurse",
         "is_support_staff",
         "can_late_night_as_nurse",
+        "works_only_on_request",
     ):
         return _YES if value else _NO
     if attr in ("fixed_off_weekdays", "night_weekdays", "fixed_work_weekdays"):
@@ -365,6 +368,10 @@ def _apply_row(
         _text(cell("weekday_unavailable_shifts")), note
     )
     profile.unit = _text(cell("unit"))
+    profile.works_only_on_request = _read_yes_no(
+        _text(cell("works_only_on_request")), "希望した日のみ勤務",
+        profile.works_only_on_request, note
+    )
     profile.is_support_staff = _read_yes_no(
         _text(cell("is_support_staff")), "介護補助", profile.is_support_staff, note
     )
