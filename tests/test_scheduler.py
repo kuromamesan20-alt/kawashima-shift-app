@@ -370,7 +370,7 @@ def test_時短や日勤は選ばれたものをそのまま書く(monkeypatch):
         can_late_night=False,
         work_hours=("08:00", "15:00"),
     )
-    for chosen in ("日", "9-16時", "9-15時"):
+    for chosen in ("日", "9-13時", "9-15時"):
         part = StaffProfile(staff_id="part-1", name="時間パートさん", **base)
         wish = StaffRequests(
             staff_id="part-1", name="時間パートさん", entries={1: chosen}
@@ -579,7 +579,7 @@ def test_時短を使えない人に時短が選ばれたら知らせる(monkeyp
     )
     profiles = _staff_with_night_roles() + [_late_night_filler()]
     target = profiles[0]
-    wish = StaffRequests(staff_id=target.staff_id, name=target.name, entries={1: "9-16時"})
+    wish = StaffRequests(staff_id=target.staff_id, name=target.name, entries={1: "9-15時"})
 
     result = build_schedule(profiles, requests=[wish], year=2026, month=9)
 
@@ -604,7 +604,7 @@ def test_曜日の時間が決まっている人の希望が黙って消えな�
         fixed_time_slots=[FixedTimeSlot(weekday=1, start="09:00", end="15:00")],
     )
     # 2026-09-01 は火曜(weekday=1)。曜日の時間が入るので、時短の希望は通らない
-    wish = StaffRequests(staff_id="slot-2", name="曜日パートさん", entries={1: "9-16時"})
+    wish = StaffRequests(staff_id="slot-2", name="曜日パートさん", entries={1: "9-15時"})
 
     profiles = _staff_with_night_roles() + [_late_night_filler(), part]
     result = build_schedule(profiles, requests=[wish], year=2026, month=9)
@@ -613,6 +613,66 @@ def test_曜日の時間が決まっている人の希望が黙って消えな�
     assert result.assignments["slot-2"] == {1: "09:00-15:00"}
     assert any(
         ALERT_MARK in m and "曜日パートさん" in m for m in result.messages
+    ), result.messages
+
+
+def test_夜勤の翌日に別の希望があると知らせる(monkeypatch):
+    """○の翌日は必ず△になる(ハード制約)。そこに別の希望が残っていると、
+
+    scheduler はハード制約を優先して○の希望そのものを黙って落としてしまう。
+    本人には分からないので、ここで必ず報告すること。
+    """
+    days = [Day(date(2026, 9, 1)), Day(date(2026, 9, 2))]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+    target = next(p for p in profiles if p.staff_id == "night-1")
+    # 1日に夜勤希望、翌2日には別の希望(公)が入っていて矛盾している
+    wish = StaffRequests(
+        staff_id=target.staff_id, name=target.name, entries={1: NIGHT_IN, 2: OFF}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert any(
+        ALERT_MARK in m and target.name in m and "2日" in m for m in result.messages
+    ), result.messages
+
+
+def test_深夜の翌日に別の希望があると知らせる(monkeypatch):
+    """◉の翌日は必ず公休になる。そこに別の希望が残っていると矛盾する。"""
+    days = [Day(date(2026, 9, 1)), Day(date(2026, 9, 2))]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+    target = next(p for p in profiles if p.staff_id == "latenight-fill")
+    # 1日に深夜希望、翌2日には別の希望(○)が入っていて矛盾している
+    wish = StaffRequests(
+        staff_id=target.staff_id, name=target.name, entries={1: LATE_NIGHT_IN, 2: NIGHT_IN}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert any(
+        ALERT_MARK in m and target.name in m and "2日" in m for m in result.messages
+    ), result.messages
+
+
+def test_夜勤の翌日が明けなら知らせない(monkeypatch):
+    """自動で入った△(明け)は矛盾ではないので、知らせを出さないこと。"""
+    days = [Day(date(2026, 9, 1)), Day(date(2026, 9, 2))]
+    monkeypatch.setattr(scheduler_module, "month_days", lambda year, month: days)
+
+    profiles = _staff_with_night_roles() + [_late_night_filler()]
+    target = next(p for p in profiles if p.staff_id == "night-1")
+    wish = StaffRequests(
+        staff_id=target.staff_id, name=target.name, entries={1: NIGHT_IN, 2: NIGHT_AFTER}
+    )
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert not any(
+        ALERT_MARK in m and target.name in m and "翌" in m for m in result.messages
     ), result.messages
 
 
@@ -630,12 +690,12 @@ def test_反映できた希望は知らせに出さない(monkeypatch):
         can_late_night=False,
         work_hours=("08:00", "15:00"),
     )
-    wish = StaffRequests(staff_id="part-2", name="時間パートさん", entries={1: "9-16時"})
+    wish = StaffRequests(staff_id="part-2", name="時間パートさん", entries={1: "9-15時"})
 
     profiles = _staff_with_night_roles() + [_late_night_filler(), part]
     result = build_schedule(profiles, requests=[wish], year=2026, month=9)
 
-    assert result.assignments["part-2"] == {1: "9-16時"}
+    assert result.assignments["part-2"] == {1: "9-15時"}
     assert not any("時間パートさん" in m and ALERT_MARK in m for m in result.messages)
 
 

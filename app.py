@@ -36,6 +36,7 @@ from kawashima_schedule.shifts import (  # noqa: E402
     DAY_SHIFTS,
     HOUR_CHOICES,
     LATE_NIGHT_IN,
+    NIGHT_AFTER,
     NIGHT_IN,
     OFF,
 )
@@ -172,12 +173,18 @@ def _wish_page() -> None:
     left, middle, right = st.columns([1, 1, 3])
     if left.button("保存する", type="primary"):
         requests = _from_frame(edited, active, days)
+        # 自動で足す△を含めないよう、本人の入力数はここで先に数えておく
+        filled = sum(len(r.entries) for r in requests)
+        # ○(夜勤)の翌日に △(明け)を補う。勤務表と同じ「○△」の並びで見えるように。
+        filled_after = _fill_night_after(requests, days)
         storage.save(year, month, requests)
         # 保存した内容が次の表示に反映されるよう、覚えていた分を捨てる
         _saved_requests.clear()
         st.session_state.pop(_frame_key(year, month), None)
-        filled = sum(len(r.entries) for r in requests)
-        right.success(f"保存しました（{filled} 件の希望）")
+        message = f"保存しました（{filled} 件の希望）"
+        if filled_after:
+            message += f" … 夜勤の翌日に明け（{NIGHT_AFTER}）を {filled_after} 件入れました"
+        right.success(message)
     with middle:
         _refresh_button()
 
@@ -437,7 +444,11 @@ def _column_config(days):
         label = _column(day)
         config[label] = st.column_config.SelectboxColumn(
             f"{day.day}({day.weekday_name})",
-            options=[BLANK] + list(WISH_CHOICES),
+            # NIGHT_AFTER(△) は選べる希望ではなく、_fill_night_after が
+            # ○(夜勤)の翌日へ保存時に自動で書き込む値。ここに含めておかないと、
+            # 保存後の再描画で SelectboxColumn が「選択肢に無い値」を持つ
+            # セルを表示することになり、画面が壊れる。
+            options=[BLANK] + list(WISH_CHOICES) + [NIGHT_AFTER],
             width="small",
             required=False,
         )
@@ -469,6 +480,30 @@ def _from_frame(frame, profiles, days):
             StaffRequests(staff_id=profile.staff_id, name=profile.name, entries=entries)
         )
     return requests
+
+
+def _fill_night_after(requests, days) -> int:
+    """○(夜勤)の翌日に △(明け)を入れる。入れた数を返す。
+
+    明けは希望ではなく、夜勤に入れば必ずそうなるもの。
+    施設の担当者は勤務表を「○△」と並べて書いているので、
+    入力画面でも同じ並びで見えたほうが確認しやすい。
+
+    すでに何か入っている日は上書きしない。
+    例えば ○ の翌日に 有 が入っていれば、そちらを尊重して知らせに任せる。
+    """
+    day_numbers = [day.day for day in days]
+    last = day_numbers[-1] if day_numbers else 0
+    added = 0
+    for request in requests:
+        for day in list(request.entries):
+            if request.entries.get(day) != NIGHT_IN or day < 1 or day >= last:
+                continue
+            if request.entries.get(day + 1):
+                continue  # すでに何か入っている日は触らない
+            request.entries[day + 1] = NIGHT_AFTER
+            added += 1
+    return added
 
 
 def _show_summary(frame, days) -> None:

@@ -133,6 +133,7 @@ def build_schedule(
 
     solver_profiles = _move_out_unworkable(solver_profiles, days, result, by_staff_request)
     _report_unusable_wishes(profiles, solver_profiles, days, result, by_staff_request)
+    _report_night_sequence_conflicts(profiles, days, result, by_staff_request)
 
     if not solver_profiles:
         result.status = "実行可能"
@@ -914,6 +915,43 @@ def _report_unusable_wishes(
                 f"{ALERT_MARK} {profile.name}: {detail} は、{why}そのままは反映できません。"
                 f"{advice}"
             )
+
+
+def _report_night_sequence_conflicts(
+    all_profiles, days, result: "ScheduleResult", by_staff_request
+) -> None:
+    """○(夜勤)・◉(深夜)の翌日に、続きと矛盾する希望が残っていないか確認する。
+
+    ○の翌日は必ず△、◉の翌日は必ず公休になる(_add_night_sequences のハード制約)。
+    そこに手入力で別の希望が残っていると、scheduler はハード制約を優先し、
+    ○/◉ の希望そのものをソフト制約(missed のペナルティ)として黙って落としてしまう。
+    記入した本人には分からないので、ここで必ず報告する。
+    """
+    day_numbers = {day.day for day in days}
+    # 記号 -> (翌日に入っているべき記号, 呼び方, 続き方の説明)
+    followups = {
+        NIGHT_IN: (NIGHT_AFTER, "夜勤", "○→△→公 と3日"),
+        LATE_NIGHT_IN: (OFF, "深夜", "◉→公 と2日"),
+    }
+
+    for profile in all_profiles:
+        request = by_staff_request.get(profile.staff_id)
+        if not request or profile.is_on_leave(result.year, result.month):
+            continue
+        for day, mark in sorted(request.entries.items()):
+            if day < 1 or day not in day_numbers or mark not in followups:
+                continue
+            expected, label, sequence = followups[mark]
+            next_day = day + 1
+            if next_day not in day_numbers:
+                continue  # 月をまたぐ場合はここでは扱わない(前月末欄の役目)
+            next_mark = request.entries.get(next_day)
+            if next_mark and next_mark != expected:
+                result.messages.append(
+                    f"{ALERT_MARK} {profile.name}: {day}日の{label}希望は、"
+                    f"翌{next_day}日に「{next_mark}」が入っているため反映できません。"
+                    f"{label}は {sequence}続くので、{next_day}日の希望を外してください"
+                )
 
 
 # --- 入れる勤務が1つも無い人 ------------------------------------------------------

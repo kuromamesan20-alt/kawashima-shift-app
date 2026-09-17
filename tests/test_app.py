@@ -315,3 +315,116 @@ def test_wish_page_clears_the_cache_after_saving():
     save_at = source.index("storage.save(")
     clear_at = source.index("_saved_requests.clear()")
     assert clear_at > save_at, "保存したあとに、覚えた分を捨てること"
+
+
+# --- 夜勤明けの自動補完 ----------------------------------------------------------
+
+
+def _days(year=2026, month=10):
+    from kawashima_schedule.calendar_utils import month_days as _md
+    return _md(year, month)
+
+
+def test_night_after_is_filled_in_the_next_day():
+    """○(夜勤)の翌日に △(明け)が入ること。"""
+    from kawashima_schedule.request_sheet import StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={12: "○"})]
+    added = app._fill_night_after(requests, _days())
+
+    assert requests[0].entries == {12: "○", 13: "△"}
+    assert added == 1
+
+
+def test_night_after_does_not_overwrite_an_existing_entry():
+    """翌日にすでに希望が入っていれば、上書きしないこと。
+
+    ○の翌日に有給が入っているような食い違いは、
+    勝手に消さずに勤務表を作るときの知らせに任せる。
+    """
+    from kawashima_schedule.request_sheet import StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={12: "○", 13: "有"})]
+    added = app._fill_night_after(requests, _days())
+
+    assert requests[0].entries[13] == "有", "先に入っていた希望を消してはいけない"
+    assert added == 0
+
+
+def test_night_after_is_not_added_past_the_end_of_the_month():
+    """月末の夜勤には明けを入れないこと(翌日がその月に無い)。"""
+    from kawashima_schedule.request_sheet import StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={31: "○"})]
+    added = app._fill_night_after(requests, _days(2026, 10))  # 10月は31日まで
+
+    assert requests[0].entries == {31: "○"}
+    assert added == 0
+
+
+def test_night_after_leaves_the_carry_over_column_alone():
+    """前月末の欄(0日)は、その月の日にちではないので触らないこと。"""
+    from kawashima_schedule.request_sheet import CARRY_OVER_DAY, StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="鈴木", entries={CARRY_OVER_DAY: "○"})]
+    added = app._fill_night_after(requests, _days())
+
+    assert requests[0].entries == {CARRY_OVER_DAY: "○"}
+    assert added == 0
+
+
+def test_night_after_handles_several_nights():
+    from kawashima_schedule.request_sheet import StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="渋谷", entries={2: "○", 14: "○", 20: "○"})]
+    added = app._fill_night_after(requests, _days())
+
+    assert added == 3
+    for day in (3, 15, 21):
+        assert requests[0].entries[day] == "△"
+
+
+def test_deep_night_does_not_get_a_night_after():
+    """◉(深夜)は ◉→公 の2日セット。明け(△)は付かないこと。"""
+    from kawashima_schedule.request_sheet import StaffRequests
+
+    requests = [StaffRequests(staff_id="id-1", name="大芦", entries={3: "◉"})]
+    added = app._fill_night_after(requests, _days())
+
+    assert requests[0].entries == {3: "◉"}
+    assert added == 0
+
+
+def test_column_config_options_include_the_auto_filled_night_after():
+    """日付列の選択肢に △(NIGHT_AFTER) が含まれること。
+
+    _fill_night_after は保存時に ○ の翌日へ自動で △ を書き込む。
+    その△が選択肢に無いと、保存後の再描画で
+    st.data_editor の SelectboxColumn が「選択肢に無い値」を
+    持つセルを表示することになり、画面が壊れる。
+    """
+    days = _days()
+    config = app._column_config(days)
+
+    for day in days:
+        # SelectboxColumn は dict を返す。選択肢は type_config の中にある。
+        options = config[app._column(day)]["type_config"]["options"]
+        assert app.NIGHT_AFTER in options, (
+            f"{day.day}日の選択肢に自動で入る△(NIGHT_AFTER)が無い"
+        )
+
+
+def test_saved_message_count_excludes_auto_filled_night_after():
+    """保存メッセージの件数(filled)に、自動で足した△を含めないこと。
+
+    _fill_night_after のあとに filled を数えると、
+    本人が入力していない△まで件数に上乗せされて誤解を招く。
+    """
+    import inspect
+
+    source = inspect.getsource(app._wish_page)
+    filled_at = source.index("filled = sum(")
+    fill_after_at = source.index("_fill_night_after(requests, days)")
+    assert filled_at < fill_after_at, (
+        "filled の件数は _fill_night_after を呼ぶ前に数えること"
+    )
