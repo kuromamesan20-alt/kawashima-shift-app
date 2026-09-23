@@ -34,6 +34,7 @@ from kawashima_schedule.scheduler import ALERT_MARK, build_schedule  # noqa: E40
 from kawashima_schedule.shifts import (  # noqa: E402
     ABSENCE_MARKS,
     DAY_SHIFTS,
+    DEFAULT_MONTHLY_OFF_DAYS,
     HOUR_CHOICES,
     LATE_NIGHT_IN,
     NIGHT_AFTER,
@@ -218,16 +219,46 @@ def _build_page() -> None:
     if not filled:
         st.warning("この月の希望はまだ1件も入っていません。このまま作ることもできます。")
 
+    off_days = int(
+        st.number_input(
+            "今月の公休の日数",
+            min_value=0,
+            max_value=15,
+            value=DEFAULT_MONTHLY_OFF_DAYS,
+            step=1,
+            key="build-off-days",
+            help=(
+                "正職員の方の公休をこの日数ちょうどにします。"
+                "ふつうは9日です。8日や10日の月だけ直してください。"
+                "パートの方は対象外です。"
+                "有・正・夏・研・健はこの日数に含めません。"
+                "0にすると、日数をそろえません。"
+            ),
+        )
+    )
+
     if not st.button("勤務表を作る", type="primary", key="build-button"):
         return
 
     with st.spinner("組んでいます。1分ほどかかることがあります..."):
-        result = build_schedule(profiles, requests, year, month, time_limit_seconds=120)
+        result = build_schedule(
+            profiles,
+            requests,
+            year,
+            month,
+            time_limit_seconds=120,
+            monthly_off_days=off_days,
+        )
 
     if not result.ok:
         st.error(f"組めませんでした（{result.status}）")
         for message in result.messages:
             st.write(f"- {message}")
+        st.info(
+            f"公休を {off_days} 日ちょうどにする条件が、"
+            "毎日の必要人数と噛み合っていない可能性があります。"
+            "日数を1日変えて試すと組めることがあります。"
+        )
         return
 
     st.success(

@@ -902,6 +902,10 @@ def _roster_for_a_few_days() -> List[StaffProfile]:
     夜勤の3日セット(○→△→公)が回らず組めなくなる。
     夜勤は1人が3日に1回しか入れないので、毎日2人ぶん埋めるには6人要る。
     深夜は ◉→公 の2日セットなので2人。
+
+    この顔ぶれで回せるのは3日ぶんまで。日勤は1人が1つのシフトしか持たず
+    代わりがいないので、4日以上にすると休みを入れられずに組めなくなる。
+    それより長い期間を試したいときは、日勤の人数を増やすこと。
     """
     staff: List[StaffProfile] = []
     for index, code in enumerate(REQUIRED_DAY_SHIFTS, 1):
@@ -1177,3 +1181,141 @@ def test_前月末が深夜だった人は当月1日の公休を休みとして�
     assert not _consecutive_model(
         dict(enumerate(run, start=1)), carry_over=LATE_NIGHT_IN
     ), "前月末が深夜だった人の当月1日の公休を、休みと数えてしまっている"
+
+
+# --- 曜日固定の方が希望も出せること(施設の担当者の選んだ形) -------------------------
+
+
+def test_曜日固定の方は希望を出しても固定の曜日に入る():
+    """「希望も入れられるし、空いている所は定期の曜日時間がオートで入る」形。
+
+    曜日ごとに勤務時間が決まっている方について、施設の担当者から
+    2つの案(曜日固定をやめて希望日だけにする/固定を残して希望も出せる)を
+    お示しし、後者を選ばれた。その形で動くことを確かめる。
+
+    2026年9月1日は火曜。火・金を固定曜日にした方で確かめる。
+      1日(火) 固定の曜日     → 勤務時間が入る
+      2日(水) 希望出勤「日」 → 希望どおり入る
+      3日(木) 何も無い       → 公休
+      4日(金) 固定の曜日だが希望休 → 希望休が勝って公休
+
+    この方はソルバーの対象外(解く前に割り当てが決まる)なので、
+    割り当てを作る関数を直接呼んで確かめる。テスト用の少人数では
+    4日ぶんの夜勤・深夜が回らず、そちらで組めなくなってしまうため。
+    """
+    part = StaffProfile(
+        staff_id="part-1",
+        name="曜日固定さん",
+        role="介護士",
+        fixed_time_slots=[
+            FixedTimeSlot(weekday=1, start="09:00", end="15:00"),  # 火
+            FixedTimeSlot(weekday=4, start="09:00", end="15:00"),  # 金
+        ],
+    )
+    wish = StaffRequests(
+        staff_id="part-1",
+        name="曜日固定さん",
+        entries={2: "日", 4: "公"},
+    )
+    days = [Day(date(2026, 9, number)) for number in (1, 2, 3, 4)]
+    assignment = scheduler_module._fixed_hours_assignment(part, days, wish)
+    assert assignment[1] == "09:00-15:00", "固定の曜日は希望がなくても入る"
+    assert assignment[2] == "日", "固定でない曜日も、希望を出せば入る"
+    assert assignment[3] == "公", "固定でも希望でもない日は公休"
+    assert assignment[4] == "公", "固定の曜日でも、希望休を出せば休みになる"
+
+
+# --- 月の公休日数 ----------------------------------------------------------------
+
+
+def test_正職員の公休は指定した日数ちょうどになる(monkeypatch):
+    """「公休は月9日にそろえてほしい」。日数は月ごとに指定してもらう。
+
+    テスト用の顔ぶれで回せるのは3日ぶんまでなので、その中で確かめる
+    (_roster_for_a_few_days を参照)。3日のうち1日を公休にする。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, number)) for number in (1, 2, 3)],
+    )
+    full_time = StaffProfile(
+        staff_id="full-1",
+        name="正職員さん",
+        role="介護士",
+        employment_type="正社員",
+        can_night=False,
+        can_late_night=False,
+        available_day_shifts=["日"],
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [full_time],
+        requests=[],
+        year=2026,
+        month=9,
+        monthly_off_days=1,
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["full-1"]
+    assert sum(1 for mark in assignment.values() if mark == OFF) == 1
+
+
+def test_パートの方は公休の日数にそろえない():
+    """パートで公休9日の方はいない(確認済み)。
+
+    週に2〜3日しか出ない方まで一律に縛ると、勤務表が成り立たなくなる。
+    縛りが付かないこと自体を見たいので、制約を足す関数を直接呼んで
+    条件が1つも増えないことを確かめる。
+    """
+    from kawashima_schedule.scheduler import _add_monthly_off_days
+
+    days = [Day(date(2026, 9, number)) for number in range(1, 6)]
+    part = StaffProfile(
+        staff_id="part-2",
+        name="パートさん",
+        role="介護士",
+        employment_type="パート（時間給）",
+    )
+    model = cp_model.CpModel()
+    variables = {
+        ("part-2", day.day, OFF): model.NewBoolVar(f"off_{day.day}") for day in days
+    }
+    before = len(model.Proto().constraints)
+    _add_monthly_off_days(model, variables, [part], days, 2)
+    assert len(model.Proto().constraints) == before
+
+
+def test_公休の日数を0にすると縛らない(monkeypatch):
+    """0は「この月は日数をそろえない」という指定。"""
+    from kawashima_schedule.scheduler import _add_monthly_off_days
+
+    model = cp_model.CpModel()
+    before = len(model.Proto().constraints)
+    _add_monthly_off_days(model, {}, [StaffProfile(staff_id="x", name="x")], [], 0)
+    assert len(model.Proto().constraints) == before
+
+
+def test_希望した日のみ勤務の方は公休の日数にそろえない():
+    """希望が無い日はすべて公休になるので、日数をそろえる条件とぶつかる。
+
+    今のところ該当する正職員はいないが、確認用Excelであとから
+    設定できてしまうため、ぶつからないようにしておく。
+    """
+    from kawashima_schedule.scheduler import _add_monthly_off_days
+
+    days = [Day(date(2026, 9, number)) for number in (1, 2, 3)]
+    profile = StaffProfile(
+        staff_id="only-3",
+        name="希望だけの正職員さん",
+        role="介護士",
+        employment_type="正社員",
+        works_only_on_request=True,
+    )
+    model = cp_model.CpModel()
+    variables = {
+        ("only-3", day.day, OFF): model.NewBoolVar(f"off_{day.day}") for day in days
+    }
+    before = len(model.Proto().constraints)
+    _add_monthly_off_days(model, variables, [profile], days, 1)
+    assert len(model.Proto().constraints) == before

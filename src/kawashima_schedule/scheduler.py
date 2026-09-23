@@ -26,6 +26,7 @@ from .models import StaffProfile
 from .request_sheet import StaffRequests
 from .shifts import (
     ABSENCE_MARKS,
+    DEFAULT_MONTHLY_OFF_DAYS,
     MAX_CONSECUTIVE_WORK_DAYS,
     DAILY_REQUIREMENT,
     DAY_SHIFT_CODES,
@@ -102,7 +103,9 @@ def build_schedule(
     year: int,
     month: int,
     time_limit_seconds: float = 60.0,
+    monthly_off_days: int = DEFAULT_MONTHLY_OFF_DAYS,
 ) -> ScheduleResult:
+    """monthly_off_days は正職員の公休の日数。月ごとに変わるので毎回指定する。"""
     days = month_days(year, month)
     result = ScheduleResult(status="組めません", year=year, month=month, days=days)
 
@@ -156,6 +159,7 @@ def build_schedule(
     _add_carry_over(model, x, solver_profiles, days, by_staff_request, result)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
+    _add_monthly_off_days(model, x, solver_profiles, days, monthly_off_days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_max_consecutive_work(model, x, solver_profiles, days, by_staff_request)
     _add_rest_after_late_shift(model, x, solver_profiles, days)
@@ -634,6 +638,43 @@ def _add_max_consecutive_work(model, x, profiles, days, by_staff_request) -> Non
 def _may_follow_late_night(day: int, day_numbers) -> bool:
     """その日の前日が、この月の中にあるか。月初は前日が無いので判定できない。"""
     return day - 1 in day_numbers
+
+
+def _add_monthly_off_days(model, x, profiles, days, off_days: int) -> None:
+    """正職員の公休を、その月に決められた日数ちょうどにする。
+
+    「通常は9日。特例で8日や10日の月もある」と伺っており、
+    何日にするかは月ごとに勤務表を作る画面で決めてもらう。
+
+    そろえるのは正職員だけ。パートの方に公休9日の方はいない(確認済み)。
+    一律に縛ると、週に2〜3日しか出ない方の勤務表が成り立たなくなる。
+    「希望した日のみ勤務」の方も、正職員であっても対象から外す。
+
+    数えるのは「公」だけ。有給・夏休・研修・健診はその日を占めるが、
+    公休とは別に数える(施設の担当者に確認済み)。
+
+    ちょうどの日数で縛るため、毎日の必要人数と噛み合わないと
+    「組めません」になる。まずこの形で試し、組めなければ理由を出して
+    ご相談する、という進め方で合意している。
+    """
+    if not off_days:
+        return
+    for profile in profiles:
+        if _has_own_schedule(profile):
+            continue
+        if profile.works_only_on_request:
+            # 「希望した日のみ勤務」の方は、希望を出していない日がすべて公休になる。
+            # 日数をそろえる条件と正面からぶつかるので、対象から外す。
+            # 今のところ該当する正職員はいないが、あとから設定できてしまう。
+            continue
+        if not _is_full_time(profile):
+            continue
+        model.Add(sum(x[profile.staff_id, day.day, OFF] for day in days) == off_days)
+
+
+def _is_full_time(profile: StaffProfile) -> bool:
+    """正職員か。雇用形態の欄が「正社員」で始まる方。"""
+    return "正社員" in (profile.employment_type or "")
 
 
 def _add_monthly_off_quota(model, x, profiles, days) -> None:

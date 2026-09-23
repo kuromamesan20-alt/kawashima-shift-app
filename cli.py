@@ -40,6 +40,7 @@ from kawashima_schedule.questions import apply_answers, build_questions  # noqa:
 from kawashima_schedule.review_report import render_html  # noqa: E402
 from kawashima_schedule.excel_export import export_schedule  # noqa: E402
 from kawashima_schedule.scheduler import build_schedule  # noqa: E402
+from kawashima_schedule.shifts import DEFAULT_MONTHLY_OFF_DAYS  # noqa: E402
 from kawashima_schedule.request_storage import GoogleSheetStorage  # noqa: E402
 
 
@@ -371,7 +372,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 return 1
             requests = load_requests(requests_path)
 
-    result = build_schedule(profiles, requests, args.year, args.month, args.time_limit)
+    result = build_schedule(
+        profiles,
+        requests,
+        args.year,
+        args.month,
+        args.time_limit,
+        monthly_off_days=args.off_days,
+    )
     print(f"{args.year}年{args.month}月: {result.status}")
     for message in result.messages:
         print(f"    - {message}")
@@ -520,6 +528,12 @@ def main() -> int:
     generate.add_argument("--month", type=int, required=True)
     generate.add_argument("--out", required=True, help="出力するExcelのパス")
     generate.add_argument("--time-limit", type=float, default=120.0, help="計算の制限時間(秒)")
+    generate.add_argument(
+        "--off-days",
+        type=int,
+        default=DEFAULT_MONTHLY_OFF_DAYS,
+        help="正職員の公休の日数。ふつうは9日。0にすると縛らない",
+    )
     generate.set_defaults(func=cmd_generate)
 
     upload = subparsers.add_parser(
