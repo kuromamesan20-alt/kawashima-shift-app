@@ -1110,3 +1110,70 @@ def test_希望した日のみでない人が全部公休なら要確認にす�
 
     mine = [m for m in result.messages if "入れる勤務が無いさん" in m]
     assert any(m.startswith(ALERT_MARK) for m in mine), mine
+
+
+def _consecutive_model(marks_by_day, carry_over: str = ""):
+    """連続勤務の制約だけを入れた小さなモデルを作り、その並びが通るか返す。
+
+    marks_by_day で1人分の勤務を全部固定してしまい、
+    _add_max_consecutive_work が「休みが1日も無い」と判定するかだけを見る。
+
+    carry_over は前月末の記号。◉(LATE_NIGHT_IN)を渡すと、月の1日目が
+    前月末の深夜から続く「公」だったケースを再現できる。
+    """
+    from ortools.sat.python import cp_model
+
+    from kawashima_schedule.scheduler import ALL_MARKS, _add_max_consecutive_work
+
+    profile = StaffProfile(staff_id="one", name="連勤さん", role="介護士")
+    days = [Day(date(2026, 9, number)) for number in sorted(marks_by_day)]
+    entries = {CARRY_OVER_DAY: carry_over} if carry_over else {}
+    request = StaffRequests(staff_id="one", name="連勤さん", entries=entries)
+    by_staff_request = {"one": request}
+
+    model = cp_model.CpModel()
+    x = {
+        ("one", day.day, mark): model.NewBoolVar(f"one_{day.day}_{mark}")
+        for day in days
+        for mark in ALL_MARKS
+    }
+    for day in days:
+        for mark in ALL_MARKS:
+            model.Add(x["one", day.day, mark] == (1 if marks_by_day[day.day] == mark else 0))
+
+    _add_max_consecutive_work(model, x, [profile], days, by_staff_request)
+
+    solver = cp_model.CpSolver()
+    return solver.Solve(model) in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+
+
+def test_深夜の翌日の公休は休みとして数えない():
+    """「◉ 公 ◉ 公 日⑦ 日⑨ ○ △」は、表の上では休みがあるが実際は連続勤務。
+
+    深夜は22時から翌朝6時までで日付をまたぐため、翌日の「公」は
+    朝まで働いた日にあたる。これを休みと数えると、
+    6日を超えて職場にいる並びが通ってしまう。
+    """
+    run = ["◉", "公", "◉", "公", "日⑦", "日⑨"]
+    assert not _consecutive_model(dict(enumerate(run, start=1))), (
+        "深夜の翌日の公休を休みと数えてしまっている"
+    )
+
+
+def test_深夜と関係ない公休は休みとして数える():
+    """普通の公休まで数えなくなると、今度は誰も勤務表に入れられなくなる。"""
+    run = ["日", "公", "日", "日", "日", "日"]
+    assert _consecutive_model(dict(enumerate(run, start=1)))
+
+
+def test_前月末が深夜だった人は当月1日の公休を休みとして数えない():
+    """月境界でも同じ扱いにする。
+
+    前月末が◉(深夜)だった人は、当月1日の「公」も朝まで働いた続きで、
+    休んだ日ではない。月をまたぐと前日がこの月の中に無いので、
+    carry_over を見ないと当月1日だけ判定から漏れてしまう。
+    """
+    run = ["公", "日", "日", "日", "日", "日"]
+    assert not _consecutive_model(
+        dict(enumerate(run, start=1)), carry_over=LATE_NIGHT_IN
+    ), "前月末が深夜だった人の当月1日の公休を、休みと数えてしまっている"

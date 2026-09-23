@@ -157,7 +157,7 @@ def build_schedule(
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
-    _add_max_consecutive_work(model, x, solver_profiles, days)
+    _add_max_consecutive_work(model, x, solver_profiles, days, by_staff_request)
     _add_rest_after_late_shift(model, x, solver_profiles, days)
     _add_request_only_days(model, x, solver_profiles, days, by_staff_request)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
@@ -570,29 +570,70 @@ def _add_request_only_days(model, x, profiles, days, by_staff_request) -> None:
                     model.Add(x[profile.staff_id, day.day, mark] == 0)
 
 
-def _add_max_consecutive_work(model, x, profiles, days) -> None:
+def _add_max_consecutive_work(model, x, profiles, days, by_staff_request) -> None:
     """連続勤務を5日までにする。
 
     6日ぶんのどの並びを見ても、必ず1日は休みが入るようにする。
     休みとは「公」と、有給・夏休・研修・健診のこと。
     夜勤明け(△)は勤務が続いているものとして数える(実物がそうなっている)。
+
+    深夜(◉)の翌日の「公」は、休みとして数えない。
+    深夜は22時から翌朝6時までの勤務で、日付をまたぐ。
+    勤務表の上では翌日が「公」でも、その日の朝まで職場にいるので
+    休んだ日ではない。施設の担当者から次の例で説明を受けた:
+
+        ◉ 公 ◉ 公 日⑦ 日⑨ ○ △
+
+    表の上では休みが2回あるように見えるが、実際は8日続けて職場にいる。
+    これを休みと数えると、職員から苦情が出る。
+
+    月の1日目については、前日が今月の中に無いのでこの月のデータだけでは
+    判定できない。前月末が深夜(◉)だった人は by_staff_request の carry_over で
+    分かるので、その人だけは1日目の「公」も休みに数えない(_add_carry_over が
+    この日を公に固定しているので、常に非休日として扱ってよい)。
     """
     rest_marks = (OFF,) + ABSENCE_MARKS
     window = MAX_CONSECUTIVE_WORK_DAYS + 1
+    day_numbers = [day.day for day in days]
+    first_day = day_numbers[0] if day_numbers else None
 
     for profile in profiles:
         if _has_own_schedule(profile):
             continue
-        for start in range(len(days) - window + 1):
-            chunk = days[start : start + window]
-            model.Add(
-                sum(
-                    x[profile.staff_id, day.day, mark]
-                    for day in chunk
-                    for mark in rest_marks
-                )
-                >= 1
-            )
+        request = by_staff_request.get(profile.staff_id) or _NO_REQUEST
+        carried_late_night_day = (
+            first_day if request.carry_over == LATE_NIGHT_IN else None
+        )
+        for start in range(len(day_numbers) - window + 1):
+            chunk = day_numbers[start : start + window]
+            terms = []
+            for day in chunk:
+                for mark in rest_marks:
+                    if mark != OFF:
+                        terms.append(x[profile.staff_id, day, mark])
+                        continue
+                    if day == carried_late_night_day:
+                        # 前月末が深夜だった人の1日目。前日はこの月に無いが、
+                        # 前月末の深夜から続く「公」だと分かっているので、
+                        # 項を足さず休みには数えない。
+                        continue
+                    if _may_follow_late_night(day, day_numbers):
+                        # 前日が深夜なら、この「公」は朝まで働いた日なので数えない。
+                        # 「公 かつ 前日が深夜でない」ときだけ休みとみなす。
+                        rest = model.NewBoolVar(f"rest_{profile.staff_id}_{day}")
+                        model.Add(rest <= x[profile.staff_id, day, OFF])
+                        model.Add(
+                            rest <= 1 - x[profile.staff_id, day - 1, LATE_NIGHT_IN]
+                        )
+                        terms.append(rest)
+                    else:
+                        terms.append(x[profile.staff_id, day, OFF])
+            model.Add(sum(terms) >= 1)
+
+
+def _may_follow_late_night(day: int, day_numbers) -> bool:
+    """その日の前日が、この月の中にあるか。月初は前日が無いので判定できない。"""
+    return day - 1 in day_numbers
 
 
 def _add_monthly_off_quota(model, x, profiles, days) -> None:
