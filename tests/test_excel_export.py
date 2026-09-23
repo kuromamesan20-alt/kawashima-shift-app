@@ -301,3 +301,94 @@ def test_選択肢が長すぎればプルダウンを付けない(monkeypatch, 
     assert len(sheet.data_validations.dataValidation) == 0
     # 勤務表そのものは書き出せていること
     assert sheet.cell(row=6, column=5).value == "日①"
+
+
+# --- 計算式の答えも一緒に書き込む -------------------------------------------------
+
+
+def _three_day_schedule():
+    """3日ぶん・2名の小さな勤務表。集計の答えが手で数えられる大きさにする。"""
+    from datetime import date
+
+    from kawashima_schedule.calendar_utils import Day
+
+    days = [Day(date(2026, 10, number)) for number in (1, 2, 3)]
+    profiles = [
+        StaffProfile(staff_id="a", name="あ", role="介護士", unit="ばら", sheet_label="1"),
+        StaffProfile(staff_id="b", name="い", role="看護師", unit="ばら", sheet_label="2"),
+    ]
+    result = ScheduleResult(status="最適", year=2026, month=10, days=days)
+    result.assignments = {
+        "a": {1: "日①", 2: "○", 3: "△"},
+        "b": {1: "公", 2: "日①", 3: "◉"},
+    }
+    return result, profiles
+
+
+def test_集計欄は計算し直さなくても数字が読める(tmp_path):
+    """Macの「Numbers」など、開いても計算し直さないアプリのための備え。
+
+    施設の担当者から「日別チェックと集計欄が空欄になる」と報告があった。
+    openpyxl は式しか書かないので、式を計算するアプリでしか数字が見えない。
+    data_only=True は「保存されている答え」だけを読むので、
+    計算し直さないアプリと同じ見え方になる。
+    """
+    import openpyxl
+
+    from kawashima_schedule.excel_export import export_schedule
+
+    result, profiles = _three_day_schedule()
+    path = tmp_path / "勤務表.xlsx"
+    export_schedule(result, profiles, path)
+
+    sheet = openpyxl.load_workbook(path, data_only=True).active
+    summary_column = {label: 8 + offset for offset, label in enumerate(SUMMARY)}
+
+    # 「あ」は 日① / ○ / △。日勤1回・夜勤1回。△は集計に数えない。
+    assert sheet.cell(row=6, column=summary_column["日勤"]).value == 1
+    assert sheet.cell(row=6, column=summary_column["夜勤"]).value == 1
+    assert sheet.cell(row=6, column=summary_column["公休"]).value == 0
+    # 「い」は 公 / 日① / ◉。
+    assert sheet.cell(row=8, column=summary_column["公休"]).value == 1
+    assert sheet.cell(row=8, column=summary_column["深夜"]).value == 1
+
+
+def test_日別チェックも計算し直さなくても数字が読める(tmp_path):
+    import openpyxl
+
+    from kawashima_schedule.excel_export import export_schedule
+
+    result, profiles = _three_day_schedule()
+    path = tmp_path / "勤務表.xlsx"
+    export_schedule(result, profiles, path)
+
+    sheet = openpyxl.load_workbook(path, data_only=True).active
+    rows = {
+        sheet.cell(row=row, column=4).value: row
+        for row in range(1, sheet.max_row + 1)
+    }
+    # 日① は1日と2日に1人ずつ、3日は0人。
+    assert [sheet.cell(row=rows["日①"], column=5 + i).value for i in range(3)] == [1, 1, 0]
+    assert [sheet.cell(row=rows["◉"], column=5 + i).value for i in range(3)] == [0, 0, 1]
+
+    judge = next(
+        row
+        for row in range(1, sheet.max_row + 1)
+        if sheet.cell(row=row, column=2).value == "6種そろっているか"
+    )
+    # 6種のうち日①しか埋まっていないので、どの日も×。
+    assert [sheet.cell(row=judge, column=5 + i).value for i in range(3)] == ["×", "×", "×"]
+
+
+def test_答えを書き込んでも式は残る(tmp_path):
+    """Excelで手直ししたときに、その場で計算し直される必要がある。"""
+    import openpyxl
+
+    from kawashima_schedule.excel_export import export_schedule
+
+    result, profiles = _three_day_schedule()
+    path = tmp_path / "勤務表.xlsx"
+    export_schedule(result, profiles, path)
+
+    sheet = openpyxl.load_workbook(path).active  # data_only=False で式を読む
+    assert sheet.cell(row=6, column=9).value == '=COUNTIF(E6:G6,"○")'

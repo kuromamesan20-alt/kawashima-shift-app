@@ -13,8 +13,12 @@
 
 from __future__ import annotations
 
+import os
+import re
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Sequence
+from xml.sax.saxutils import escape
 
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
@@ -119,17 +123,23 @@ def export_schedule(
     _write_title(sheet, result)
     _write_header(sheet, days, events)
 
+    # 計算式のセルについて、その答えをここに控えておく。
+    # {"AJ6": 20} のように、セルの位置と答えを入れる。保存の後で書き込む。
+    cached: Dict[str, object] = {}
+
     ordered = _order_staff(profiles, result)
     row = FIRST_STAFF_ROW
     previous_unit = None
     for profile in ordered:
         unit = _unit_label(profile)
-        _write_staff(sheet, row, profile, result, unit if unit != previous_unit else "")
+        _write_staff(
+            sheet, row, profile, result, unit if unit != previous_unit else "", cached
+        )
         previous_unit = unit
         row += 2
 
     staff_rows = (FIRST_STAFF_ROW, max(FIRST_STAFF_ROW, row - 1))
-    _write_daily_check(sheet, row + 1, days, staff_rows)
+    _write_daily_check(sheet, row + 1, days, staff_rows, ordered, result, cached)
     _add_mark_dropdown(
         sheet,
         [FIRST_STAFF_ROW + index * 2 for index in range(len(ordered))],
@@ -139,6 +149,7 @@ def export_schedule(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
+    _write_cached_values(path, cached)
 
 
 # --- 見出し -------------------------------------------------------------------
@@ -224,7 +235,7 @@ def _unit_label(profile: StaffProfile) -> str:
     return profile.unit
 
 
-def _write_staff(sheet, row: int, profile, result, unit_label: str) -> None:
+def _write_staff(sheet, row: int, profile, result, unit_label: str, cached) -> None:
     if unit_label:
         cell = sheet.cell(row=row, column=UNIT_COLUMN, value=unit_label)
         cell.font = Font(bold=True, size=10)
@@ -257,13 +268,20 @@ def _write_staff(sheet, row: int, profile, result, unit_label: str) -> None:
         _write_mark(sheet, row + 1, column, extra, day.is_weekend, small=True)
 
     days_range = _row_range(row, len(result.days))
+    # 集計の対象は1行目の勤務欄だけ。2行目(中抜けの2コマ目と「せ」)は数えない。
+    marks_in_row = [_split_mark(assignment.get(day.day, ""))[0] for day in result.days]
     for offset, label in enumerate(SUMMARY):
+        column = FIRST_DAY_COLUMN + len(result.days) + offset
+        marks = SUMMARY_MARKS[label]
         cell = sheet.cell(
-            row=row, column=FIRST_DAY_COLUMN + len(result.days) + offset,
-            value=_countif_formula(days_range, SUMMARY_MARKS[label]),
+            row=row, column=column, value=_countif_formula(days_range, marks)
         )
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = _BORDER
+        if marks:
+            cached[f"{get_column_letter(column)}{row}"] = sum(
+                1 for mark in marks_in_row if mark in marks
+            )
 
 
 def _role_label(profile: StaffProfile) -> str:
@@ -309,10 +327,81 @@ def _countif_formula(cell_range: str, marks) -> str:
     return "=" + "+".join(f'COUNTIF({cell_range},"{mark}")' for mark in marks)
 
 
+# --- 計算式の答えを書き込む ------------------------------------------------------
+
+
+def _write_cached_values(path: Path, cached: Dict[str, object]) -> None:
+    """計算式のセルに、その答えも一緒に書き込む。
+
+    Excelのファイルは、計算式のセルに「式」と「前回の答え」の両方を持てる。
+    Excelは開いたときに式を計算し直すが、Macの「Numbers」など他のアプリは
+    計算し直さず、保存されている答えをそのまま見せる。
+    openpyxl は式しか書かないので、そういうアプリでは集計欄が
+    まるごと空欄に見えてしまう(施設の担当者から報告あり)。
+
+    そこで、保存した後のファイルを開いて、式のとなりに答えを差し込む。
+    式は残したままなので、Excelで手直しすればその場で計算し直される。
+    """
+    if not cached:
+        return
+
+    # この勤務表はシート1枚だけ(export_schedule が1枚しか作らない)。
+    # シートを増やすときは、ここも直すこと。
+    sheet_name = "xl/worksheets/sheet1.xml"
+    with zipfile.ZipFile(path) as source:
+        names = source.namelist()
+        if sheet_name not in names:
+            return  # 想定しない構成。何もしないでおく(壊すよりは空欄のまま)
+        contents = {name: source.read(name) for name in names}
+
+    contents[sheet_name] = _insert_values(
+        contents[sheet_name].decode("utf-8"), cached
+    ).encode("utf-8")
+
+    # いったん別の名前で書いてから置き換える。
+    # 同じファイルに直接上書きすると、書いている途中で止まったときに
+    # お客様にお渡しするファイルが壊れたまま残ってしまう。
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as destination:
+            for name in names:
+                destination.writestr(name, contents[name])
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+# 計算式が入っているセル1つ分。
+# openpyxl は答えの場所を <v /> と空で書くので、そこも一緒に拾って置き換える。
+#   <c r="AJ6" s="5"><f>COUNTIF(...)</f><v /></c>
+_FORMULA_CELL = re.compile(
+    r'<c r="([A-Z]+\d+)"([^>]*)>(<f[^>]*>.*?</f>)(?:<v\s*/>|<v>.*?</v>)?</c>',
+    re.DOTALL,
+)
+
+
+def _insert_values(xml: str, cached: Dict[str, object]) -> str:
+    """セルの式のうしろに <v>答え</v> を差し込む。"""
+
+    def replace(match):
+        reference, attributes, formula = match.groups()
+        if reference not in cached:
+            return match.group(0)
+        value = cached[reference]
+        # 型の指定は書き直す。文字が答えのときは t="str" が要る。
+        attributes = re.sub(r'\s*t="[^"]*"', "", attributes)
+        if isinstance(value, str):
+            attributes += ' t="str"'
+        return f'<c r="{reference}"{attributes}>{formula}<v>{escape(str(value))}</v></c>'
+
+    return _FORMULA_CELL.sub(replace, xml)
+
+
 # --- 最下部の集計 --------------------------------------------------------------
 
 
-def _write_daily_check(sheet, row: int, days, staff_rows) -> None:
+def _write_daily_check(sheet, row: int, days, staff_rows, ordered, result, cached) -> None:
     """番号付き6種が毎日そろっているかを確かめる行。実物にも同じものがある。
 
     こちらも数字ではなく式で入れる。勤務表を手直ししたときに、
@@ -327,6 +416,15 @@ def _write_daily_check(sheet, row: int, days, staff_rows) -> None:
     first_staff_row, last_staff_row = staff_rows
     codes = REQUIRED_DAY_SHIFTS + (NIGHT_IN, LATE_NIGHT_IN)
     count_rows = {}
+    # その日に誰がどの記号だったか。式の答えを控えるために数える。
+    # 集計と同じく、数えるのは1行目の勤務欄だけ。
+    marks_on_day = {
+        day.day: [
+            _split_mark(result.assignments.get(profile.staff_id, {}).get(day.day, ""))[0]
+            for profile in ordered
+        ]
+        for day in days
+    }
 
     for offset, code in enumerate(codes):
         line = row + 1 + offset
@@ -344,6 +442,7 @@ def _write_daily_check(sheet, row: int, days, staff_rows) -> None:
             cell.alignment = Alignment(horizontal="center")
             cell.font = Font(size=8)
             cell.border = _BORDER
+            cached[f"{letter}{line}"] = marks_on_day[day.day].count(code)
 
     judge = row + 1 + len(codes) + 1
     sheet.cell(row=judge, column=ROLE_COLUMN, value="6種そろっているか").font = Font(
@@ -361,6 +460,10 @@ def _write_daily_check(sheet, row: int, days, staff_rows) -> None:
         )
         cell.alignment = Alignment(horizontal="center")
         cell.border = _BORDER
+        complete = all(
+            marks_on_day[day.day].count(code) == 1 for code in REQUIRED_DAY_SHIFTS
+        )
+        cached[f"{letter}{judge}"] = "○" if complete else "×"
 
     _mark_shortage(sheet, judge, len(days))
 
