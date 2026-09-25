@@ -1319,3 +1319,72 @@ def test_希望した日のみ勤務の方は公休の日数にそろえない()
     before = len(model.Proto().constraints)
     _add_monthly_off_days(model, variables, [profile], days, 1)
     assert len(model.Proto().constraints) == before
+
+
+# --- 守れなかったときは、勤務表を出して知らせる -------------------------------------
+
+
+def test_公休の日数にできなくても勤務表を出して知らせる(monkeypatch):
+    """絶対に守る条件にしない。9割の叩き台を出し、ずれた所を知らせる。
+
+    毎日の必要人数は絶対に守るので、日①に入れるのがその人だけなら
+    3日とも日①に入るしかなく、公休は0日になる。
+    以前はこの状況で勤務表が1枚も出てこなかった。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, number)) for number in (1, 2, 3)],
+    )
+    staff = _roster_for_a_few_days()
+    # 日①に入れるのはこの人だけ。正職員なので公休の日数の対象になる。
+    only_early = next(p for p in staff if p.staff_id == "day-1")
+    only_early.employment_type = "正社員"
+    only_early.name = "早出"
+
+    result = build_schedule(staff, requests=[], year=2026, month=9, monthly_off_days=1)
+
+    assert result.ok, result.messages
+    assert all(mark == "日①" for mark in result.assignments["day-1"].values())
+    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
+    assert any("早出さんは公休0日です" in m for m in alerts), alerts
+
+
+def test_遅番の翌日に早出が入ってしまったら知らせる():
+    """こちらも絶対に守る条件にはしない。守れなかった日を知らせる。
+
+    ソルバーは避けられる限り避けるので、避けられなかった形を
+    手で組み立てて、知らせが出ることを確かめる。
+    """
+    from kawashima_schedule.scheduler import ScheduleResult, _report_soft_misses
+
+    days = [Day(date(2026, 9, number)) for number in (1, 2)]
+    profile = StaffProfile(
+        staff_id="late-1",
+        name="遅番",
+        role="介護士",
+        employment_type="パート（時間給）",
+    )
+    result = ScheduleResult(status="最適", year=2026, month=9, days=days)
+    result.assignments = {"late-1": {1: "日⑦", 2: "日①"}}
+
+    _report_soft_misses(result, [profile], off_days=0)
+
+    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
+    assert len(alerts) == 1, result.messages
+    assert "遅番の翌日に早出と日が入っている所が1件あります" in alerts[0]
+    assert "9月2日 遅番さん（日⑦の翌日に日①）" in alerts[0]
+
+
+def test_遅番の翌日が公休なら知らせない():
+    """守れているときに知らせが出ると、本当に見てほしいものが埋もれる。"""
+    from kawashima_schedule.scheduler import ScheduleResult, _report_soft_misses
+
+    days = [Day(date(2026, 9, number)) for number in (1, 2)]
+    profile = StaffProfile(staff_id="late-2", name="遅番", role="介護士")
+    result = ScheduleResult(status="最適", year=2026, month=9, days=days)
+    result.assignments = {"late-2": {1: "日⑦", 2: OFF}}
+
+    _report_soft_misses(result, [profile], off_days=0)
+
+    assert result.messages == []

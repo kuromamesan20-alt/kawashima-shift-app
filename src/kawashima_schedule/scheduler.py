@@ -60,6 +60,18 @@ WEIGHT_NIGHT_AFTER_NIGHT = 200
 
 WEIGHT_LAST_RESORT = 300
 
+# 「できるだけ守る」に回した2つ。
+# このアプリが作るのは叩き台で、9割できた状態から人が手で直す前提。
+# 絶対に守る条件にすると、守れない月に勤務表が1枚も出てこない。
+# それより、出したうえで守れなかった所を知らせる方がよい、と
+# 施設の担当者と決めた。
+#
+# 公休の日数は労務に直結するので重くする。希望出勤(40)より優先する。
+WEIGHT_OFF_DAYS = 60
+# 遅番の翌日の早出。体への負担の話なので軽くはしないが、
+# 公休の日数ほどではない。
+WEIGHT_REST_AFTER_LATE = 45
+
 # 同じ相手と夜間に2回以上組むことへのペナルティ(1回超過あたり)。
 # 「夜勤は同じナースが複数回同席しないようにして下さい」への対応。
 # 一緒に入ると負担が増えるため、特定の人に偏ると不満が出る。
@@ -69,6 +81,11 @@ WEIGHT_PARTNER_REPEAT = 25
 # 深夜(◉)は介護職が8〜9割。看護職で入るのは決まった人だけ。
 # 深夜(◉)に入れる看護職は、profile.can_late_night_as_nurse で指定する。
 # 誰がその人かは施設ごとに違うので、コードに名前は書かない。
+
+# 遅番の翌日に入れたくない勤務のうち、早出(日①②)以外のもの。
+# 施設の担当者のご要望「⑤⑦⑨遅番の次の日は①②③早出と日は付けない」の
+# 「③」と「日」にあたる。早出の定義(日①②)は変えないこと。
+REST_AFTER_LATE_EXTRA: Tuple[str, ...] = ("日③", "日")
 
 # 見落とすと勤務表がおかしいまま渡ってしまう知らせに付ける印。
 # 画面側はこの印で並べ替えず、必ず目に入る場所に出す。
@@ -159,16 +176,18 @@ def build_schedule(
     _add_carry_over(model, x, solver_profiles, days, by_staff_request, result)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_monthly_off_quota(model, x, solver_profiles, days)
-    _add_monthly_off_days(model, x, solver_profiles, days, monthly_off_days)
+    off_day_terms = _add_monthly_off_days(
+        model, x, solver_profiles, days, monthly_off_days
+    )
     _add_weekly_days_off(model, x, solver_profiles, days, by_staff_request)
     _add_max_consecutive_work(model, x, solver_profiles, days, by_staff_request)
-    _add_rest_after_late_shift(model, x, solver_profiles, days)
+    late_shift_terms = _add_rest_after_late_shift(model, x, solver_profiles, days)
     _add_request_only_days(model, x, solver_profiles, days, by_staff_request)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
     se = _add_responsible(model, x, solver_profiles, days, result)
 
     penalties = _soft_constraints(model, x, solver_profiles, days, by_staff_request)
-    penalties += pair_terms
+    penalties += pair_terms + off_day_terms + late_shift_terms
     model.Minimize(sum(penalties) if penalties else 0)
 
     solver = cp_model.CpSolver()
@@ -210,7 +229,51 @@ def build_schedule(
     for (staff_id, day_number), variable in se.items():
         if solver.Value(variable):
             result.responsible[day_number] = staff_id
+
+    _report_soft_misses(result, solver_profiles, monthly_off_days)
     return result
+
+
+def _report_soft_misses(result, profiles, off_days: int) -> None:
+    """「できるだけ守る」にした条件のうち、守れなかった所を知らせる。
+
+    このアプリが作るのは叩き台で、9割できた状態から人が手で直す。
+    守れなかった所が分からないと直せないので、必ず目に入る場所に出す。
+    施設の担当者にお伝えしている文言と同じ形にする。
+    """
+    if off_days:
+        missed = []
+        for profile in _off_days_targets(profiles):
+            assignment = result.assignments.get(profile.staff_id, {})
+            actual = sum(1 for mark in assignment.values() if mark == OFF)
+            if actual != off_days:
+                missed.append(f"{profile.name}さんは公休{actual}日です")
+        if missed:
+            result.messages.append(
+                f"{ALERT_MARK} 公休を{off_days}日にできなかった方が"
+                f"{len(missed)}名いらっしゃいます … " + " ／ ".join(missed)
+            )
+
+    forbidden_next = tuple(EARLY_SHIFTS) + REST_AFTER_LATE_EXTRA
+    day_numbers = [day.day for day in result.days]
+    broken = []
+    for profile in profiles:
+        assignment = result.assignments.get(profile.staff_id, {})
+        for index, day in enumerate(day_numbers[:-1]):
+            tomorrow = day_numbers[index + 1]
+            if (
+                assignment.get(day) in LATE_SHIFTS
+                and assignment.get(tomorrow) in forbidden_next
+            ):
+                broken.append(
+                    f"{result.month}月{tomorrow}日 {profile.name}さん"
+                    f"（{assignment[day]}の翌日に{assignment[tomorrow]}）"
+                )
+    if broken:
+        result.messages.append(
+            f"{ALERT_MARK} 遅番の翌日に早出と日が入っている所が"
+            f"{len(broken)}件あります … " + " ／ ".join(broken)
+        )
 
 
 # --- 変数 ---------------------------------------------------------------------
@@ -523,7 +586,7 @@ def _has_own_schedule(profile) -> bool:
     return bool(profile.fixed_time_slots or profile.is_support_staff)
 
 
-def _add_rest_after_late_shift(model, x, profiles, days) -> None:
+def _add_rest_after_late_shift(model, x, profiles, days) -> List:
     """遅番の翌日に早出と「日」を入れない。
 
     施設の担当者のご要望:
@@ -534,22 +597,31 @@ def _add_rest_after_late_shift(model, x, profiles, days) -> None:
     遅くまで働いた翌朝に早い勤務が来ないようにする、勤務間の間隔の確保。
 
     翌日に残るのは 遅番・夜勤・深夜・公休・有給など。
+
+    絶対に守る条件にはしない。守れない月に勤務表が1枚も出てこないより、
+    出したうえで「〇月〇日は遅番の翌日に早出が入っています」と
+    知らせる方がよい、と施設の担当者と決めた。ペナルティを返す。
     """
-    forbidden_next = tuple(EARLY_SHIFTS) + ("日③", "日")
+    forbidden_next = tuple(EARLY_SHIFTS) + REST_AFTER_LATE_EXTRA
     day_numbers = [day.day for day in days]
 
+    penalties = []
     for profile in profiles:
         if _has_own_schedule(profile):
             continue
         for index, day in enumerate(day_numbers[:-1]):
             tomorrow = day_numbers[index + 1]
-            # 「今日の遅番」と「翌日の早い勤務」を合わせて1つまで。
-            # 組ごとに書くより制約が少なく済む(1日あたり12本 → 1本)。
+            # 「今日は遅番」かつ「翌日は早い勤務」のときだけ1になる印。
+            # 遅番と早い勤務はそれぞれ1日1つなので、2つの和が2になる形。
+            broke = model.NewBoolVar(f"late_then_early_{profile.staff_id}_{day}")
             model.Add(
                 sum(x[profile.staff_id, day, late] for late in LATE_SHIFTS)
                 + sum(x[profile.staff_id, tomorrow, early] for early in forbidden_next)
-                <= 1
+                - 1
+                <= broke
             )
+            penalties.append(WEIGHT_REST_AFTER_LATE * broke)
+    return penalties
 
 
 def _add_request_only_days(model, x, profiles, days, by_staff_request) -> None:
@@ -640,36 +712,50 @@ def _may_follow_late_night(day: int, day_numbers) -> bool:
     return day - 1 in day_numbers
 
 
-def _add_monthly_off_days(model, x, profiles, days, off_days: int) -> None:
-    """正職員の公休を、その月に決められた日数ちょうどにする。
+def _off_days_targets(profiles) -> List[StaffProfile]:
+    """公休の日数をそろえる対象の方。
+
+    そろえるのは正職員だけ。パートの方に公休9日の方はいない(確認済み)。
+    一律に縛ると、週に2〜3日しか出ない方の勤務表が成り立たなくなる。
+
+    「希望した日のみ勤務」の方も、正職員であっても対象から外す。
+    希望を出していない日がすべて公休になるので、日数をそろえる話と
+    かみ合わない。今のところ該当する正職員はいないが、あとから
+    設定できてしまう。
+    """
+    return [
+        profile
+        for profile in profiles
+        if not _has_own_schedule(profile)
+        and not profile.works_only_on_request
+        and _is_full_time(profile)
+    ]
+
+
+def _add_monthly_off_days(model, x, profiles, days, off_days: int) -> List:
+    """正職員の公休を、その月に決められた日数に近づける。ペナルティを返す。
 
     「通常は9日。特例で8日や10日の月もある」と伺っており、
     何日にするかは月ごとに勤務表を作る画面で決めてもらう。
 
-    そろえるのは正職員だけ。パートの方に公休9日の方はいない(確認済み)。
-    一律に縛ると、週に2〜3日しか出ない方の勤務表が成り立たなくなる。
-    「希望した日のみ勤務」の方も、正職員であっても対象から外す。
-
     数えるのは「公」だけ。有給・夏休・研修・健診はその日を占めるが、
     公休とは別に数える(施設の担当者に確認済み)。
 
-    ちょうどの日数で縛るため、毎日の必要人数と噛み合わないと
-    「組めません」になる。まずこの形で試し、組めなければ理由を出して
-    ご相談する、という進め方で合意している。
+    ちょうどの日数で縛ると、噛み合わない月に勤務表が1枚も出てこない。
+    それより、出したうえで「〇〇さんは公休8日です」と知らせる方がよい、
+    と施設の担当者と決めた。ずれた日数ぶんだけペナルティを付ける。
     """
     if not off_days:
-        return
-    for profile in profiles:
-        if _has_own_schedule(profile):
-            continue
-        if profile.works_only_on_request:
-            # 「希望した日のみ勤務」の方は、希望を出していない日がすべて公休になる。
-            # 日数をそろえる条件と正面からぶつかるので、対象から外す。
-            # 今のところ該当する正職員はいないが、あとから設定できてしまう。
-            continue
-        if not _is_full_time(profile):
-            continue
-        model.Add(sum(x[profile.staff_id, day.day, OFF] for day in days) == off_days)
+        return []
+
+    penalties = []
+    for profile in _off_days_targets(profiles):
+        actual = sum(x[profile.staff_id, day.day, OFF] for day in days)
+        gap = model.NewIntVar(0, len(days), f"off_gap_{profile.staff_id}")
+        model.Add(gap >= actual - off_days)
+        model.Add(gap >= off_days - actual)
+        penalties.append(WEIGHT_OFF_DAYS * gap)
+    return penalties
 
 
 def _is_full_time(profile: StaffProfile) -> bool:
