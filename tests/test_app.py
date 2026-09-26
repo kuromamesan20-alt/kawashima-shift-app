@@ -329,7 +329,7 @@ def test_night_after_is_filled_in_the_next_day():
     """○(夜勤)の翌日に △(明け)が入ること。"""
     from kawashima_schedule.request_sheet import StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={12: "○"})]
+    requests = [StaffRequests(staff_id="id-1", name="高橋", entries={12: "○"})]
     added = app._fill_night_after(requests, _days())
 
     assert requests[0].entries == {12: "○", 13: "△"}
@@ -344,7 +344,7 @@ def test_night_after_does_not_overwrite_an_existing_entry():
     """
     from kawashima_schedule.request_sheet import StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={12: "○", 13: "有"})]
+    requests = [StaffRequests(staff_id="id-1", name="高橋", entries={12: "○", 13: "有"})]
     added = app._fill_night_after(requests, _days())
 
     assert requests[0].entries[13] == "有", "先に入っていた希望を消してはいけない"
@@ -355,7 +355,7 @@ def test_night_after_is_not_added_past_the_end_of_the_month():
     """月末の夜勤には明けを入れないこと(翌日がその月に無い)。"""
     from kawashima_schedule.request_sheet import StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="佐々", entries={31: "○"})]
+    requests = [StaffRequests(staff_id="id-1", name="高橋", entries={31: "○"})]
     added = app._fill_night_after(requests, _days(2026, 10))  # 10月は31日まで
 
     assert requests[0].entries == {31: "○"}
@@ -366,7 +366,7 @@ def test_night_after_leaves_the_carry_over_column_alone():
     """前月末の欄(0日)は、その月の日にちではないので触らないこと。"""
     from kawashima_schedule.request_sheet import CARRY_OVER_DAY, StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="鈴木", entries={CARRY_OVER_DAY: "○"})]
+    requests = [StaffRequests(staff_id="id-1", name="吉田", entries={CARRY_OVER_DAY: "○"})]
     added = app._fill_night_after(requests, _days())
 
     assert requests[0].entries == {CARRY_OVER_DAY: "○"}
@@ -376,7 +376,7 @@ def test_night_after_leaves_the_carry_over_column_alone():
 def test_night_after_handles_several_nights():
     from kawashima_schedule.request_sheet import StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="渋谷", entries={2: "○", 14: "○", 20: "○"})]
+    requests = [StaffRequests(staff_id="id-1", name="森田", entries={2: "○", 14: "○", 20: "○"})]
     added = app._fill_night_after(requests, _days())
 
     assert added == 3
@@ -388,7 +388,7 @@ def test_deep_night_does_not_get_a_night_after():
     """◉(深夜)は ◉→公 の2日セット。明け(△)は付かないこと。"""
     from kawashima_schedule.request_sheet import StaffRequests
 
-    requests = [StaffRequests(staff_id="id-1", name="大芦", entries={3: "◉"})]
+    requests = [StaffRequests(staff_id="id-1", name="伊藤", entries={3: "◉"})]
     added = app._fill_night_after(requests, _days())
 
     assert requests[0].entries == {3: "◉"}
