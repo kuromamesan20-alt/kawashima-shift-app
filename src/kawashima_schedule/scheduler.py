@@ -751,7 +751,12 @@ def _add_monthly_off_days(model, x, profiles, days, off_days: int) -> List:
     penalties = []
     for profile in _off_days_targets(profiles):
         actual = sum(x[profile.staff_id, day.day, OFF] for day in days)
-        gap = model.NewIntVar(0, len(days), f"off_gap_{profile.staff_id}")
+        # ずれの上限は、日数と指定日数の大きいほう。
+        # 日数より多い公休を指定されたとき、上限が足りないと
+        # ずれを表せず「組めません」になってしまう。
+        gap = model.NewIntVar(
+            0, max(len(days), off_days), f"off_gap_{profile.staff_id}"
+        )
         model.Add(gap >= actual - off_days)
         model.Add(gap >= off_days - actual)
         penalties.append(WEIGHT_OFF_DAYS * gap)
@@ -889,7 +894,20 @@ def _add_responsible(model, x, profiles, days, result) -> Dict[Tuple[str, int], 
     実物の勤務表で確かめたルール:
       - 師長が出勤している日は「せ」を付けない(師長が担うため)。31日中、例外なし
       - 師長が休みの日は、日責ができる人を1人「せ」にする
-      - 「せ」になれるのは、その日に出勤している人だけ
+      - 「せ」になれるのは、その日に日勤帯で働いている人だけ
+
+    最後の1つは、施設の担当者から次のご指摘を受けて直した(2026年10月):
+
+      「川島が9-17の時間に休みの日に責任者を立てたいのですが、
+        『せ』が夜勤の日・公休の日についている方がいるので、
+        そこが困ったところです」
+
+    責任者は日中に現場にいて初めて務まる。それまでは「公休でなければよい」と
+    していたため、夜勤(○)・夜勤明け(△)・深夜(◉)・有給などの方にも
+    「せ」が付いていた(10月は9日のうち7日が該当)。
+
+    師長が休みかどうかも、公休だけでなく有給・夏休・研修・健診を含めて見る。
+    有給の日に「せ」が立たないと、その日は誰も責任者がいないことになる。
     """
     se: Dict[Tuple[str, int], object] = {}
     head = next((p for p in profiles if p.is_head_nurse), None)
@@ -912,18 +930,28 @@ def _add_responsible(model, x, profiles, days, result) -> Dict[Tuple[str, int], 
                 f"se_{profile.staff_id}_{day.day}"
             )
 
+    rest_marks = (OFF,) + ABSENCE_MARKS
+
     for day in days:
-        # 師長が出勤しているか(公休でなければ出勤とみなす)
+        # 師長が出勤しているか。公休だけでなく有給・夏休・研修・健診も休みとみなす。
         head_working = model.NewBoolVar(f"head_working_{day.day}")
-        model.Add(head_working == 1 - x[head.staff_id, day.day, OFF])
+        model.Add(
+            head_working
+            == 1 - sum(x[head.staff_id, day.day, mark] for mark in rest_marks)
+        )
 
         todays = [se[p.staff_id, day.day] for p in able]
         # 師長が休みの日はちょうど1人、出勤の日は0人
         model.Add(sum(todays) == 1 - head_working)
 
         for profile in able:
-            # 休みの人は責任者になれない
-            model.Add(se[profile.staff_id, day.day] <= 1 - x[profile.staff_id, day.day, OFF])
+            # 責任者になれるのは、その日に日勤帯で働いている人だけ。
+            # 夜勤(○)・夜勤明け(△)・深夜(◉)・公休・有給などの方は、
+            # 日中に現場にいないので務まらない。
+            model.Add(
+                se[profile.staff_id, day.day]
+                <= sum(x[profile.staff_id, day.day, code] for code in DAY_SHIFT_CODES)
+            )
     return se
 
 

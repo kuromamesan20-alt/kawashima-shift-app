@@ -31,6 +31,7 @@ from kawashima_schedule.request_sheet import (  # noqa: E402
     StaffRequests,
 )
 from kawashima_schedule.shifts import (  # noqa: E402
+    DAY_SHIFT_CODES,
     LATE_NIGHT_IN,
     NIGHT_AFTER,
     NIGHT_IN,
@@ -1388,3 +1389,114 @@ def test_遅番の翌日が公休なら知らせない():
     _report_soft_misses(result, [profile], off_days=0)
 
     assert result.messages == []
+
+
+# --- 責任者「せ」 ---------------------------------------------------------------
+
+
+def _roster_with_head_and_responsible(head_mark: str):
+    """師長が休みで、日責ができる人が2人いる1日ぶんの顔ぶれ。
+
+    片方は夜勤にしか入れない人、もう片方は日勤帯に入れる人。
+    「せ」が夜勤の人に付かないことを確かめるために分けている。
+    """
+    staff = _roster_for_a_few_days()
+    head = StaffProfile(
+        staff_id="head",
+        name="師長",
+        role="看護師",
+        employment_type="正社員",
+        is_head_nurse=True,
+        available_day_shifts=["日"],
+        can_night=False,
+        can_late_night=False,
+    )
+    # 夜勤の顔ぶれのうち1人を、日責ができる人にする。
+    # この人は日勤帯に入れないので、「せ」になってはいけない。
+    night = next(p for p in staff if p.staff_id == "night-1")
+    night.day_responsible = "可"
+    night.name = "夜勤できる人"
+    # 日勤帯で働く、日責ができる人。「せ」はこちらに付くはず。
+    day_worker = StaffProfile(
+        staff_id="day-worker",
+        name="日勤の人",
+        role="看護師",
+        employment_type="正社員",
+        day_responsible="可",
+        available_day_shifts=["日"],
+        can_night=False,
+        can_late_night=False,
+    )
+    return staff + [head, day_worker], head
+
+
+def test_責任者は日勤帯で働いている人から選ぶ(monkeypatch):
+    """施設の担当者から「『せ』が夜勤の日についている方がいる」とご指摘があった。
+
+    責任者は日中に現場にいて初めて務まる。夜勤・夜勤明け・深夜の方には付けない。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles, head = _roster_with_head_and_responsible(OFF)
+    wish = StaffRequests(staff_id="head", name="師長", entries={1: OFF})
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.responsible.get(1) == "day-worker", "日勤帯で働く人に付くこと"
+    assert result.assignments["day-worker"][1] in DAY_SHIFT_CODES
+
+
+def test_師長が有給の日にも責任者を立てる(monkeypatch):
+    """公休だけを見ていると、師長が有給・夏休・研修の日に誰もいなくなる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles, head = _roster_with_head_and_responsible("有")
+    wish = StaffRequests(staff_id="head", name="師長", entries={1: "有"})
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["head"][1] == "有"
+    assert result.responsible.get(1) == "day-worker", "師長が有給の日も責任者が要る"
+
+
+def test_師長が出勤している日は責任者を立てない(monkeypatch):
+    """師長ご本人が責任者を担うため。実物の勤務表でも例外がなかった。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles, head = _roster_with_head_and_responsible("日")
+    wish = StaffRequests(staff_id="head", name="師長", entries={1: "日"})
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments["head"][1] == "日"
+    assert 1 not in result.responsible
+
+
+def test_日数より多い公休を指定しても組める(monkeypatch):
+    """3日しかない月に公休9日を指定しても、勤務表は出ること。
+
+    ずれを表す変数の上限が日数までだと、9日とのずれ(6日)を表せず、
+    条件が矛盾して「組めません」になってしまう。
+    画面の入力は15日までなので実際には起きないが、
+    「必ず1枚出す」という決まりに穴を開けないようにする。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, number)) for number in (1, 2, 3)],
+    )
+    staff = _roster_for_a_few_days()
+    full_time = next(p for p in staff if p.staff_id == "day-1")
+    full_time.employment_type = "正社員"
+
+    result = build_schedule(staff, requests=[], year=2026, month=9, monthly_off_days=9)
+
+    assert result.ok, result.messages
+    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
+    assert any("公休を9日にできなかった方" in m for m in alerts), alerts
