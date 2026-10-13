@@ -88,6 +88,14 @@ class StaffProfile:
     can_late_night: bool = True  # ◉(深夜入り)に入れるか
     # 入れる日勤帯のコード。既定は全部(日①②③⑤⑦⑨)。
     available_day_shifts: List[str] = field(default_factory=lambda: list(DAY_SHIFT_CODES))
+    # 番号のシフトに加えて、時短の時間でも働ける方のための欄。
+    # 例: ["9-13時", "13-17時"]。空なら時短は使えない(ふつうはこちら)。
+    #
+    # 施設の担当者から「佐々木は日以外に変則勤務ができる方なので
+    # 早出③、8-16、日、9-13、13-17 を可能にしてほしい」とご要望があった。
+    # 日③などの番号は available_day_shifts、時間の方はここで持つ。
+    # 時短は番号の枠(毎日1人)には数えないので、他の方の枠を奪わない。
+    available_hour_choices: List[str] = field(default_factory=list)
     # 曜日限定で入れない日勤帯。{曜日: [コード]}。
     # 「毎週火・水・金は8時より前の早番は不可」のように、特定の曜日にだけかかる条件。
     # ここに無い曜日は available_day_shifts のとおり。

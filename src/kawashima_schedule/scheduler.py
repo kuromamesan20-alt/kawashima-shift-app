@@ -41,9 +41,14 @@ from .shifts import (
     SELF_WRITTEN_MARKS,
 )
 
-# 割り当てうる記号(時間直書きの人を除く)
+# 割り当てうる記号(時間直書きの人を除く)。
+# 時短(9-13時 など)も入れてある。使えるのは available_hour_choices のある方だけで、
+# ほかの方には _add_availability で禁止をかける。
 ALL_MARKS: Tuple[str, ...] = (
-    tuple(DAY_SHIFT_CODES) + (NIGHT_IN, NIGHT_AFTER, LATE_NIGHT_IN, OFF) + ABSENCE_MARKS
+    tuple(DAY_SHIFT_CODES)
+    + tuple(HOUR_CHOICES)
+    + (NIGHT_IN, NIGHT_AFTER, LATE_NIGHT_IN, OFF)
+    + ABSENCE_MARKS
 )
 
 # ソフト制約の重み。大きいほど優先して守る。
@@ -151,6 +156,19 @@ def build_schedule(
             result.messages.append(f"{profile.name}: {reason}")
         else:
             solver_profiles.append(profile)
+            # 「9-13」のように「時」が抜けた書き間違いは、対応する変数が無いので
+            # _add_availability の対象にも入らず、その人が黙って全公休になる。
+            typos = [
+                choice
+                for choice in profile.available_hour_choices
+                if choice not in HOUR_CHOICES
+            ]
+            if typos:
+                result.messages.append(
+                    f"{ALERT_MARK} {profile.name}: 使える時短に、選べない書き方"
+                    f"「{'」「'.join(typos)}」が入っています。"
+                    f"「{'」「'.join(HOUR_CHOICES)}」のどれかに直してください"
+                )
 
     solver_profiles = _move_out_unworkable(solver_profiles, days, result, by_staff_request)
     _report_unusable_wishes(profiles, solver_profiles, days, result, by_staff_request)
@@ -230,11 +248,13 @@ def build_schedule(
         if solver.Value(variable):
             result.responsible[day_number] = staff_id
 
-    _report_soft_misses(result, solver_profiles, monthly_off_days)
+    _report_soft_misses(result, solver_profiles, monthly_off_days, by_staff_request)
     return result
 
 
-def _report_soft_misses(result, profiles, off_days: int) -> None:
+def _report_soft_misses(
+    result, profiles, off_days: int, by_staff_request=None
+) -> None:
     """「できるだけ守る」にした条件のうち、守れなかった所を知らせる。
 
     このアプリが作るのは叩き台で、9割できた状態から人が手で直す。
@@ -275,6 +295,39 @@ def _report_soft_misses(result, profiles, off_days: int) -> None:
             f"{len(broken)}件あります … " + " ／ ".join(broken)
         )
 
+    # 希望出勤は「できるだけ守る」なので、週休2日や連続勤務の上限、毎日1人の枠と
+    # ぶつかると、希望の日が黙って公休や別の記号に変わる。記入した本人にも分からない。
+    # 使えない記号の希望は _report_unusable_wishes が別に知らせているので、ここでは数えない。
+    days_by_number = {day.day: day for day in result.days}
+    wish_missed = []
+    for profile in profiles:
+        request = (by_staff_request or {}).get(profile.staff_id)
+        if not request:
+            continue
+        assignment = result.assignments.get(profile.staff_id, {})
+        for day_number, mark in request.wish_work_days().items():
+            day = days_by_number.get(day_number)
+            if day is None or mark not in allowed_entry_marks(profile, day):
+                continue
+            actual = assignment.get(day_number)
+            if actual != mark:
+                wish_missed.append(
+                    (
+                        # 希望が勤務日そのものを決める方の取りこぼしは影響が大きいので先に並べる
+                        not profile.works_only_on_request,
+                        day_number,
+                        f"{profile.name}さん {result.month}月{day_number}日"
+                        f"(希望 {mark} → {actual or '未定'})",
+                    )
+                )
+    if wish_missed:
+        wish_missed.sort(key=lambda item: item[:2])
+        result.messages.append(
+            f"{ALERT_MARK} 希望どおりにならなかった日が"
+            f"{len(wish_missed)}件あります … "
+            + " ／ ".join(item[2] for item in wish_missed)
+        )
+
 
 # --- 変数 ---------------------------------------------------------------------
 
@@ -308,6 +361,8 @@ def allowed_entry_marks(profile, day) -> set:
     判定が食い違うと、誰も勤務できない人が黙って全公休になってしまう。
     """
     marks = set(profile.shifts_allowed_on(day.weekday))
+    # 時短でも働ける方。番号の枠には数えないので、曜日の制限はかからない。
+    marks |= set(profile.available_hour_choices)
     if profile.can_night:
         marks.add(NIGHT_IN)
     if profile.can_late_night:
@@ -333,8 +388,14 @@ def allowed_entry_marks(profile, day) -> set:
 
 
 def _add_availability(model, x, profiles, days) -> None:
-    """入れない勤務を禁止する。"""
-    entry_marks = tuple(DAY_SHIFT_CODES) + (NIGHT_IN, LATE_NIGHT_IN)
+    """入れない勤務を禁止する。
+
+    時短(9-13時 など)もここで絞る。既定では誰も使えず、
+    available_hour_choices に入っている方だけが使える。
+    """
+    entry_marks = (
+        tuple(DAY_SHIFT_CODES) + tuple(HOUR_CHOICES) + (NIGHT_IN, LATE_NIGHT_IN)
+    )
     for profile in profiles:
         for day in days:
             allowed = allowed_entry_marks(profile, day)
@@ -1149,7 +1210,16 @@ def _report_unusable_wishes(
             continue
 
         if profile.staff_id in solver_ids:
-            unusable = {d: m for d, m in wishes.items() if m in HOUR_CHOICES}
+            # 使えるかどうかは allowed_entry_marks に合わせる。深夜専従や夜勤専従の方は
+            # available_hour_choices に入っていても時短が落ちるので、そちらを見ないと
+            # 希望が知らせなしに消える。曜日で変わるので日ごとに見る。
+            days_by_number = {day.day: day for day in days}
+            unusable = {
+                d: m
+                for d, m in wishes.items()
+                if m in HOUR_CHOICES
+                and m not in allowed_entry_marks(profile, days_by_number[d])
+            }
             advice = "番号のシフトか「日」を選んでください"
             why = "この方は番号のシフトで組む方なので"
         else:

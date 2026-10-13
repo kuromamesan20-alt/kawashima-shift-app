@@ -32,6 +32,7 @@ from kawashima_schedule.request_sheet import (  # noqa: E402
 )
 from kawashima_schedule.shifts import (  # noqa: E402
     DAY_SHIFT_CODES,
+    HOUR_CHOICES,
     LATE_NIGHT_IN,
     NIGHT_AFTER,
     NIGHT_IN,
@@ -1500,3 +1501,276 @@ def test_日数より多い公休を指定しても組める(monkeypatch):
     assert result.ok, result.messages
     alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
     assert any("公休を9日にできなかった方" in m for m in alerts), alerts
+
+
+# --- 番号のシフトにも時短にも入れる方 ------------------------------------------------
+
+
+def test_時短を使える人は希望どおり時短で入る(monkeypatch):
+    """施設の担当者のご要望(2026年10月):
+
+      「佐々木は日以外に変則勤務ができる方なので
+        『早出③、8-16、日、9-13、13-17』これらを可能にしてほしい」
+
+    番号のシフト(日③・日)と時短(9-13時・13-17時)の両方を使える方。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, number)) for number in (1, 2, 3)],
+    )
+    flexible = StaffProfile(
+        staff_id="flex-1",
+        name="変則勤務さん",
+        role="看護師",
+        available_day_shifts=["日③", "日"],
+        available_hour_choices=["9-13時", "13-17時"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(
+        staff_id="flex-1",
+        name="変則勤務さん",
+        entries={1: "9-13時", 2: "日③", 3: "13-17時"},
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [flexible], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["flex-1"]
+    assert assignment[1] == "9-13時"
+    assert assignment[2] == "日③"
+    assert assignment[3] == "13-17時"
+
+
+def test_時短を使えない人には時短を割り当てない(monkeypatch):
+    """既定では誰も時短を使えない。使えるのは available_hour_choices のある方だけ。
+
+    希望を出されても割り当てないこと。希望が無いだけだと、使えるかどうかに
+    関わらず元から「日」を選ぶので、確かめたことにならない。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    ordinary = StaffProfile(
+        staff_id="plain-1",
+        name="ふつうの人",
+        role="介護士",
+        available_day_shifts=["日"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="plain-1", name="ふつうの人", entries={1: "9-13時"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [ordinary], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert result.assignments["plain-1"][1] not in HOUR_CHOICES
+
+
+def test_希望した日のみ勤務の方の希望は番号のシフトも時短も通る(monkeypatch):
+    """希望が勤務日そのものを決める方でも、希望した記号どおりに入ること。"""
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2, 3)],
+    )
+    only = StaffProfile(
+        staff_id="only-flex",
+        name="希望だけ変則さん",
+        role="看護師",
+        works_only_on_request=True,
+        available_day_shifts=["日③", "日"],
+        available_hour_choices=["9-13時"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(
+        staff_id="only-flex",
+        name="希望だけ変則さん",
+        entries={1: "9-13時", 2: "日③"},
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assignment = result.assignments["only-flex"]
+    assert assignment[1] == "9-13時"
+    assert assignment[2] == "日③"
+    assert assignment[3] == "公", "希望が無い日は公休"
+    assert not [m for m in result.messages if "希望どおりにならなかった" in m]
+
+
+def test_希望出勤が叶わなかったら知らせる(monkeypatch):
+    """週休2日や連続勤務の上限などとぶつかって希望が変わった日を、黙って落とさない。
+
+    ここでは前月末の夜勤(○)から、1日は明け・2日は公休と決まっているので、
+    2日の希望出勤は必ず叶わない。
+    """
+    monkeypatch.setattr(
+        scheduler_module,
+        "month_days",
+        lambda year, month: [Day(date(2026, 9, d)) for d in (1, 2, 3)],
+    )
+    only = StaffProfile(
+        staff_id="only-miss",
+        name="叶わない希望さん",
+        role="介護士",
+        works_only_on_request=True,
+        available_day_shifts=["日"],
+        can_night=True,
+        can_late_night=False,
+    )
+    wish = StaffRequests(
+        staff_id="only-miss",
+        name="叶わない希望さん",
+        entries={CARRY_OVER_DAY: "○", 2: "日"},
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [only], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert result.assignments["only-miss"][2] == "公"
+    alerts = [
+        m for m in result.messages if m.startswith(ALERT_MARK) and "希望どおりにならなかった" in m
+    ]
+    assert len(alerts) == 1, result.messages
+    assert "叶わない希望さん" in alerts[0]
+    assert "9月2日(希望 日 → 公)" in alerts[0]
+
+
+def test_時短を使えない人の時短の希望は希望どおりにならなかったとして重ねて知らせない(monkeypatch):
+    """使えない記号の希望は別の知らせが出ている。二重に出すと見る側が混乱する。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    ordinary = StaffProfile(
+        staff_id="plain-2",
+        name="ふつうの人",
+        role="介護士",
+        available_day_shifts=["日"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="plain-2", name="ふつうの人", entries={1: "9-13時"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [ordinary], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert any(ALERT_MARK in m and "そのままは反映できません" in m for m in result.messages)
+    assert not [m for m in result.messages if "希望どおりにならなかった" in m]
+
+
+def test_深夜専従の人の時短の希望は反映できない希望として知らせる(monkeypatch):
+    """使える時短に入っていても、深夜専従だと時短は落ちる。黙って消さない。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    night_only = StaffProfile(
+        staff_id="lnight-only",
+        name="深夜専従さん",
+        role="介護士",
+        available_day_shifts=[],
+        available_hour_choices=["9-13時"],
+        can_night=False,
+        can_late_night=True,
+        late_night_only=True,
+    )
+    wish = StaffRequests(staff_id="lnight-only", name="深夜専従さん", entries={1: "9-13時"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [night_only], requests=[wish], year=2026, month=9
+    )
+
+    assert any(
+        ALERT_MARK in m and "深夜専従さん" in m and "そのままは反映できません" in m
+        for m in result.messages
+    ), result.messages
+
+
+def test_使える時短に選べない書き方が入っていたら知らせる(monkeypatch):
+    """「9-13」のように「時」が抜けていると、変数が無く黙って全公休になる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    typo = StaffProfile(
+        staff_id="typo-1",
+        name="書き間違いさん",
+        role="介護士",
+        available_day_shifts=["日"],
+        available_hour_choices=["9-13"],
+        can_night=False,
+        can_late_night=False,
+    )
+    result = build_schedule(
+        _roster_for_a_few_days() + [typo], requests=[], year=2026, month=9
+    )
+
+    assert any(
+        m.startswith(ALERT_MARK) and "書き間違いさん" in m and "9-13" in m
+        for m in result.messages
+    ), result.messages
+
+
+def test_時短の日は番号の枠を埋めない(monkeypatch):
+    """時短は毎日1人の枠には数えない。他の方の枠を奪わないこと。
+
+    日③に入れるのがこの2人だけの状況で、片方が時短を希望したら、
+    もう片方が日③に入って枠が埋まる。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    staff = [p for p in _roster_for_a_few_days() if p.staff_id != "day-3"]
+    flexible = StaffProfile(
+        staff_id="flex-2",
+        name="変則勤務さん",
+        role="看護師",
+        available_day_shifts=["日③"],
+        available_hour_choices=["9-13時"],
+        can_night=False,
+        can_late_night=False,
+    )
+    backup = StaffProfile(
+        staff_id="backup-1",
+        name="日③の人",
+        role="介護士",
+        available_day_shifts=["日③"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="flex-2", name="変則勤務さん", entries={1: "9-13時"})
+    result = build_schedule(
+        staff + [flexible, backup], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert result.assignments["flex-2"][1] == "9-13時"
+    assert result.assignments["backup-1"][1] == "日③", "枠はもう片方が埋めること"
+
+
+def test_使える時短は反映できない希望として知らせない(monkeypatch):
+    """知らせが出ると、本当に見てほしいものが埋もれる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    flexible = StaffProfile(
+        staff_id="flex-3",
+        name="変則勤務さん",
+        role="看護師",
+        available_day_shifts=["日"],
+        available_hour_choices=["9-13時"],
+        can_night=False,
+        can_late_night=False,
+    )
+    wish = StaffRequests(staff_id="flex-3", name="変則勤務さん", entries={1: "9-13時"})
+    result = build_schedule(
+        _roster_for_a_few_days() + [flexible], requests=[wish], year=2026, month=9
+    )
+
+    assert result.ok, result.messages
+    assert not [m for m in result.messages if "変則勤務さん" in m and ALERT_MARK in m]
