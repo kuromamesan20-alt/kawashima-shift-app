@@ -175,8 +175,15 @@ def test_深夜に入れる看護職は指定された人だけ(monkeypatch):
     )
     profiles = _staff_with_night_roles() + [nurse]
 
-    # 指定が無ければ、看護職は深夜に入れない → 深夜の枠が埋まらず組めない
-    assert not build_schedule(profiles, requests=[], year=2026, month=9).ok
+    # 指定が無ければ、看護職は深夜に入れない。
+    # 毎日の必要人数は「できるだけ守る」なので、勤務表は出たうえで
+    # 「◉ … 0名(1名必要)」と知らせが出る。
+    without = build_schedule(profiles, requests=[], year=2026, month=9)
+    assert without.ok, without.messages
+    assert without.assignments["nurse-late"][1] != LATE_NIGHT_IN
+    assert any(
+        m.startswith(ALERT_MARK) and "◉ … 0名(1名必要)" in m for m in without.messages
+    ), without.messages
 
     nurse.can_late_night_as_nurse = True
     result = build_schedule(profiles, requests=[], year=2026, month=9)
@@ -701,10 +708,12 @@ def test_反映できた希望は知らせに出さない(monkeypatch):
     assert not any("時間パートさん" in m and ALERT_MARK in m for m in result.messages)
 
 
-def test_組めないときはどの日が足りないか知らせる(monkeypatch):
+def test_組めないときは原因の日を知らせ人数のせいにしない(monkeypatch):
     """「組めません」だけでは何を直せばよいか分からない。
 
-    希望休を入れすぎた日を、日付で示す。
+    絶対に守る条件で入れる人がいない日(○の看護職)を、日付で示す。
+    毎日の必要人数は「できるだけ守る」なので、人数が原因だとは案内しない。
+    師長が「希望休を減らせばよい」と誤解して、無駄な作業をしないため。
     """
     monkeypatch.setattr(
         scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
@@ -720,8 +729,13 @@ def test_組めないときはどの日が足りないか知らせる(monkeypatc
 
     assert not result.ok
     assert any(
-        "人手が足りない日" in message and "1日" in message for message in result.messages
+        "○夜勤に入れる看護職がいない日" in message and "1日" in message
+        for message in result.messages
     ), result.messages
+    joined = "\n".join(result.messages)
+    assert "人手が足りない日" not in joined
+    assert "希望休を減らすと組めるようになります" not in joined
+    assert "入れる人が足りていない" not in joined
 
 
 def test_組めない理由が人数でないときはその旨を伝える(monkeypatch):
@@ -739,9 +753,10 @@ def test_組めない理由が人数でないときはその旨を伝える(monk
     result = build_schedule(profiles, requests=[], year=2026, month=9)
 
     assert not result.ok
-    assert any("日ごとの人数だけを見ると足りています" in m for m in result.messages), (
+    assert any("原因の日は見つかりませんでした" in m for m in result.messages), (
         result.messages
     )
+    assert not any("希望休を" in m for m in result.messages), result.messages
 
 
 # --- 前月からの引き継ぎ ----------------------------------------------------------
@@ -1372,10 +1387,13 @@ def test_遅番の翌日に早出が入ってしまったら知らせる():
 
     _report_soft_misses(result, [profile], off_days=0)
 
-    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
-    assert len(alerts) == 1, result.messages
-    assert "遅番の翌日に早出と日が入っている所が1件あります" in alerts[0]
-    assert "9月2日 遅番さん（日⑦の翌日に日①）" in alerts[0]
+    # この人しかいないので、毎日の必要人数が埋まらない知らせも出る。
+    # ここで見たいのは遅番の方なので、そちらだけ取り出す。
+    late = [m for m in result.messages if "遅番の翌日" in m]
+    assert len(late) == 1, result.messages
+    assert late[0].startswith(ALERT_MARK)
+    assert "遅番の翌日に早出と日が入っている所が1件あります" in late[0]
+    assert "9月2日 遅番さん（日⑦の翌日に日①）" in late[0]
 
 
 def test_遅番の翌日が公休なら知らせない():
@@ -1389,7 +1407,7 @@ def test_遅番の翌日が公休なら知らせない():
 
     _report_soft_misses(result, [profile], off_days=0)
 
-    assert result.messages == []
+    assert not [m for m in result.messages if "遅番の翌日" in m], result.messages
 
 
 # --- 責任者「せ」 ---------------------------------------------------------------
@@ -1774,3 +1792,137 @@ def test_使える時短は反映できない希望として知らせない(monk
 
     assert result.ok, result.messages
     assert not [m for m in result.messages if "変則勤務さん" in m and ALERT_MARK in m]
+
+
+# --- 毎日の必要人数 --------------------------------------------------------------
+
+
+def test_人数が埋まらなくても勤務表を出して知らせる(monkeypatch):
+    """施設の担当者と決めた形(2026年10月)。
+
+      「1枚も出てこないより、埋まらない枠を知らせて出す方がよい」
+
+    希望休が連休に集中した月は、絶対に守る条件のままだと
+    勤務表が1枚も出てこなかった。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    # 日③に入れる人だけがいない顔ぶれ。ほかの枠は埋まる。
+    staff = [p for p in _coverage_staff() if p.available_day_shifts != ["日③"]]
+
+    result = build_schedule(staff, requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages
+    alerts = [m for m in result.messages if m.startswith(ALERT_MARK)]
+    shortage = [m for m in alerts if "人数が合っていない枠" in m]
+    assert len(shortage) == 1, alerts
+    assert "9月1日 日③ … 0名(1名必要)" in shortage[0]
+    assert "日① …" not in shortage[0], "埋まった枠は知らせに出さない"
+    assert "○ …" not in shortage[0], "埋まった枠は知らせに出さない"
+
+
+def test_人数が埋まるときは知らせない(monkeypatch):
+    """守れているときに知らせが出ると、本当に見てほしいものが埋もれる。"""
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    result = build_schedule(_coverage_staff(), requests=[], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert not [m for m in result.messages if "人数が合っていない枠" in m], result.messages
+
+
+def test_人数が多すぎる枠は足りないと言わずに人数で知らせる():
+    """ペナルティは多すぎる場合も罰するので、知らせも両方を拾う。
+
+    ソルバーは余らせないよう避けるので、2人入ってしまった形を
+    手で組み立てて、知らせが出ることを確かめる。
+    """
+    from kawashima_schedule.scheduler import ScheduleResult, _report_soft_misses
+
+    days = [Day(date(2026, 9, 1))]
+    people = [
+        StaffProfile(staff_id=f"over-{i}", name=f"重複{i}", role="介護士")
+        for i in (1, 2)
+    ]
+    result = ScheduleResult(status="最適", year=2026, month=9, days=days)
+    result.assignments = {p.staff_id: {1: "日①"} for p in people}
+
+    _report_soft_misses(result, people, off_days=0)
+
+    misses = [m for m in result.messages if "人数が合っていない枠" in m]
+    assert len(misses) == 1, result.messages
+    assert "9月1日 日① … 2名(1名必要)" in misses[0]
+    assert "足りない" not in misses[0]
+
+
+# --- 責任者「せ」が立てられない日 -------------------------------------------------
+
+
+def test_日勤帯で働く日責可能者がいない日でも勤務表を出して知らせる(monkeypatch):
+    """日勤帯の人数がソフトになったので、日責可能者が誰も日勤帯で働かない日がありうる。
+
+    「せ」をちょうど1人にしていると、その日で全体が組めなくなり、
+    勤務表が1枚も出てこない。出したうえで、立たなかった日を知らせる。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles, head = _roster_with_head_and_responsible(OFF)
+    # 師長が休みで、日勤帯に入れる日責可能者も休み。夜勤の日責可能者は日中に居ない。
+    requests = [
+        StaffRequests(staff_id="head", name="師長", entries={1: OFF}),
+        StaffRequests(staff_id="day-worker", name="日勤の人", entries={1: OFF}),
+    ]
+
+    result = build_schedule(profiles, requests=requests, year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert 1 not in result.responsible
+    notes = [
+        m
+        for m in result.messages
+        if m.startswith(ALERT_MARK) and "責任者「せ」が立っていない日" in m
+    ]
+    assert len(notes) == 1, result.messages
+    assert "1件あります" in notes[0]
+    assert "9月1日" in notes[0]
+
+
+def test_責任者が立っている日は知らせない(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    profiles, head = _roster_with_head_and_responsible(OFF)
+    wish = StaffRequests(staff_id="head", name="師長", entries={1: OFF})
+
+    result = build_schedule(profiles, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.responsible.get(1) == "day-worker"
+    assert not [m for m in result.messages if "責任者「せ」が立っていない" in m]
+
+
+def test_必要人数は他のどの希望よりも優先する(monkeypatch):
+    """人数を埋めるためなら、ほかの希望は諦める。
+
+    日①にしか入れない人が1人だけで、その人が希望休を出している。
+    希望休は絶対に守る条件なので公休のまま。日①は埋まらない。
+    一方、希望出勤は「できるだけ」なので、人数を埋める側が勝つ。
+    """
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    staff = _coverage_staff()
+    # 日②の人に「日」を希望してもらう。日②が埋まらなくなるので、
+    # 人数の重み(5000)が希望出勤(40)に勝ち、日②のままになるはず。
+    target = next(p for p in staff if p.available_day_shifts == ["日②"])
+    target.available_day_shifts = ["日②", "日"]
+    wish = StaffRequests(staff_id=target.staff_id, name=target.name, entries={1: "日"})
+
+    result = build_schedule(staff, requests=[wish], year=2026, month=9)
+
+    assert result.ok, result.messages
+    assert result.assignments[target.staff_id][1] == "日②", "人数を埋める方を優先する"
+    assert any("希望どおりにならなかった日" in m for m in result.messages)

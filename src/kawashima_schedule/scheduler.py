@@ -71,6 +71,22 @@ WEIGHT_LAST_RESORT = 300
 # それより、出したうえで守れなかった所を知らせる方がよい、と
 # 施設の担当者と決めた。
 #
+# 毎日の必要人数。これを破るのは本当に最後の手段。
+# 他のどのソフト制約より圧倒的に重くして、人数が埋まらない形を
+# 最後まで避けさせる。
+#
+# 絶対に守る条件のままにしておくと、希望休が連休に集中した月に
+# 勤務表が1枚も出てこない。実際、2026年11月は3連休に9名・7名・6名の
+# 希望休が重なって組めなくなった。
+# 施設の担当者とも「出ないよりは、埋まらない枠を知らせて出す方がよい」と
+# 決めている(2026年10月)。
+WEIGHT_COVERAGE = 5000
+
+# 師長が休みの日に責任者「せ」が立たないことへのペナルティ(1日あたり)。
+# 責任者がいない日は現場が困るので、公休の日数(60)よりは重くする。
+# ただし日勤帯の人数(5000)を犠牲にしてまで立てるものではない。
+WEIGHT_RESPONSIBLE = 100
+
 # 公休の日数は労務に直結するので重くする。希望出勤(40)より優先する。
 WEIGHT_OFF_DAYS = 60
 # 遅番の翌日の早出。体への負担の話なので軽くはしないが、
@@ -189,7 +205,7 @@ def build_schedule(
         if (by_staff_request.get(profile.staff_id) or _NO_REQUEST).carry_over == NIGHT_IN
     }
     _add_night_sequences(model, x, solver_profiles, days, carry_night_ids)
-    _add_coverage(model, x, solver_profiles, days)
+    coverage_terms = _add_coverage(model, x, solver_profiles, days)
     _add_night_composition(model, x, solver_profiles, days)
     _add_carry_over(model, x, solver_profiles, days, by_staff_request, result)
     _add_fixed_days_off(model, x, solver_profiles, days, by_staff_request)
@@ -202,10 +218,11 @@ def build_schedule(
     late_shift_terms = _add_rest_after_late_shift(model, x, solver_profiles, days)
     _add_request_only_days(model, x, solver_profiles, days, by_staff_request)
     pair_terms = _add_pair_constraints(model, x, solver_profiles, days)
-    se = _add_responsible(model, x, solver_profiles, days, result)
+    se, responsible_terms = _add_responsible(model, x, solver_profiles, days, result)
 
     penalties = _soft_constraints(model, x, solver_profiles, days, by_staff_request)
-    penalties += pair_terms + off_day_terms + late_shift_terms
+    penalties += pair_terms + off_day_terms + late_shift_terms + coverage_terms
+    penalties += responsible_terms
     model.Minimize(sum(penalties) if penalties else 0)
 
     solver = cp_model.CpSolver()
@@ -223,8 +240,10 @@ def build_schedule(
     elif status == cp_model.INFEASIBLE:
         result.status = "組めません"
         result.messages.append(
-            "条件を全部同時に満たす組み方が存在しません。"
-            "毎日の必要人数に対して、入れる人が足りていない可能性があります。"
+            "絶対に守る条件(夜勤の顔ぶれ・夜勤の並び・同席・週休2日・"
+            "連続勤務の上限・希望休と前月からの引き継ぎ)を全部同時に"
+            "満たす組み方が存在しません。毎日の必要人数は「できるだけ守る」なので、"
+            "人数が足りないことは原因ではありません。"
         )
         result.messages.extend(
             _diagnose_shortage(solver_profiles, days, by_staff_request)
@@ -261,6 +280,48 @@ def _report_soft_misses(
     守れなかった所が分からないと直せないので、必ず目に入る場所に出す。
     施設の担当者にお伝えしている文言と同じ形にする。
     """
+    # 毎日の必要人数。いちばん大事なので先頭に出す。
+    # 「出ないよりは、埋まらない枠を知らせて出す」と施設の担当者と決めている。
+    # ペナルティは多すぎる場合も同じ強さで罰するので、知らせも両方を拾う。
+    # 少ない方は埋まっていない枠、多い方は余っている枠で、直し方が逆になるため
+    # 「0名(1名必要)」「2名(1名必要)」と人数で見分けられるようにする。
+    short = []
+    for day in result.days:
+        for mark in tuple(REQUIRED_DAY_SHIFTS) + (NIGHT_IN, LATE_NIGHT_IN):
+            needed = DAILY_REQUIREMENT[mark]
+            actual = sum(
+                1
+                for profile in profiles
+                if result.assignments.get(profile.staff_id, {}).get(day.day) == mark
+            )
+            if actual != needed:
+                short.append(
+                    f"{result.month}月{day.day}日 {mark} … {actual}名({needed}名必要)"
+                )
+    if short:
+        result.messages.append(
+            f"{ALERT_MARK} 人数が合っていない枠が{len(short)}件あります … "
+            + " ／ ".join(short)
+        )
+
+    # 師長が休みの日の責任者「せ」。日勤帯で働く日責可能者がいない日は立てられない。
+    # 師長か日責可能者が名簿にいない月は _add_responsible が別に知らせているので、ここでは数えない。
+    head = next((p for p in profiles if p.is_head_nurse), None)
+    has_able = any(p.day_responsible in ("可", "条件付き可") for p in profiles)
+    if head is not None and has_able:
+        head_assignment = result.assignments.get(head.staff_id, {})
+        no_responsible = [
+            f"{result.month}月{day.day}日"
+            for day in result.days
+            if head_assignment.get(day.day) in (OFF,) + ABSENCE_MARKS
+            and day.day not in result.responsible
+        ]
+        if no_responsible:
+            result.messages.append(
+                f"{ALERT_MARK} 師長が休みの日に責任者「せ」が立っていない日が"
+                f"{len(no_responsible)}件あります … " + " ／ ".join(no_responsible)
+            )
+
     if off_days:
         missed = []
         for profile in _off_days_targets(profiles):
@@ -445,24 +506,32 @@ def _add_night_sequences(model, x, profiles, days, carry_night_ids=()) -> None:
                 model.AddImplication(x[staff, day, LATE_NIGHT_IN], x[staff, day + 1, OFF])
 
 
-def _add_coverage(model, x, profiles, days) -> None:
-    """毎日の必要人数を満たす。人数は shifts.DAILY_REQUIREMENT に従う。
+def _add_coverage(model, x, profiles, days) -> List:
+    """毎日の必要人数に近づける。人数は shifts.DAILY_REQUIREMENT に従う。
 
     番号付きの日勤帯は「ちょうど1人」。実物の勤務表に6種がそろっているかを
     判定する行があり、毎日1人ずつで組まれているため。
     「日」は人数の決まりが無いので、ここでは縛らない。
+
+    絶対に守る条件にはしない。守れない月に勤務表が1枚も出てこないより、
+    出したうえで「11月1日 日③ … 0名(1名必要)」と知らせる方がよい、と
+    施設の担当者と決めた(2026年10月)。
+
+    ただし破ってよい条件ではないので、重みは他より桁違いに大きくする。
+    ほかの希望をすべて諦めてでも、まず人数を埋める。
     """
+    penalties = []
     for day in days:
-        for code in REQUIRED_DAY_SHIFTS:
-            model.Add(
-                sum(x[profile.staff_id, day.day, code] for profile in profiles)
-                == DAILY_REQUIREMENT[code]
+        for mark in tuple(REQUIRED_DAY_SHIFTS) + (NIGHT_IN, LATE_NIGHT_IN):
+            needed = DAILY_REQUIREMENT[mark]
+            actual = sum(x[profile.staff_id, day.day, mark] for profile in profiles)
+            gap = model.NewIntVar(
+                0, max(len(profiles), needed), f"cover_gap_{day.day}_{mark}"
             )
-        for mark in (NIGHT_IN, LATE_NIGHT_IN):
-            model.Add(
-                sum(x[profile.staff_id, day.day, mark] for profile in profiles)
-                == DAILY_REQUIREMENT[mark]
-            )
+            model.Add(gap >= actual - needed)
+            model.Add(gap >= needed - actual)
+            penalties.append(WEIGHT_COVERAGE * gap)
+    return penalties
 
 
 def _add_night_composition(model, x, profiles, days) -> None:
@@ -969,21 +1038,27 @@ def _add_responsible(model, x, profiles, days, result) -> Dict[Tuple[str, int], 
 
     師長が休みかどうかも、公休だけでなく有給・夏休・研修・健診を含めて見る。
     有給の日に「せ」が立たないと、その日は誰も責任者がいないことになる。
+
+    絶対に守る条件にはしない。日勤帯の人数が「できるだけ守る」になったため、
+    日勤帯で働く日責可能者が0人の日がありうる。そこで組めなくなるより、
+    出したうえで「11月1日は責任者が立っていません」と知らせる方がよい。
+    ペナルティと戻り値の扱いは _add_coverage と同じ(se と一緒に返す)。
     """
     se: Dict[Tuple[str, int], object] = {}
+    penalties: List = []
     head = next((p for p in profiles if p.is_head_nurse), None)
     if head is None:
         result.messages.append(
             "師長が設定されていないため、責任者「せ」は決めていません。"
             "確認用Excelの「師長」列で指定してください。"
         )
-        return se
+        return se, penalties
 
     # 日責ができる人。「可」を優先し、いなければ「条件付き可」も使う。
     able = [p for p in profiles if p.day_responsible in ("可", "条件付き可")]
     if not able:
         result.messages.append("日責ができる人がいないため、責任者「せ」は決めていません。")
-        return se
+        return se, penalties
 
     for profile in able:
         for day in days:
@@ -1002,8 +1077,15 @@ def _add_responsible(model, x, profiles, days, result) -> Dict[Tuple[str, int], 
         )
 
         todays = [se[p.staff_id, day.day] for p in able]
-        # 師長が休みの日はちょうど1人、出勤の日は0人
-        model.Add(sum(todays) == 1 - head_working)
+        # 師長が出勤の日は0人、休みの日は多くて1人。
+        # 「ちょうど1人」にすると、日勤帯の人数がソフトになったいま、
+        # その日に日勤帯で働く日責可能者が0人の日で全体が組めなくなり、
+        # 勤務表が1枚も出てこない。立てられない日は知らせて、人が決める。
+        model.Add(sum(todays) <= 1 - head_working)
+        # 師長が休みなのに立たなかった日だけ1になる印
+        unfilled = model.NewBoolVar(f"se_unfilled_{day.day}")
+        model.Add(unfilled >= 1 - head_working - sum(todays))
+        penalties.append(WEIGHT_RESPONSIBLE * unfilled)
 
         for profile in able:
             # 責任者になれるのは、その日に日勤帯で働いている人だけ。
@@ -1013,7 +1095,7 @@ def _add_responsible(model, x, profiles, days, result) -> Dict[Tuple[str, int], 
                 se[profile.staff_id, day.day]
                 <= sum(x[profile.staff_id, day.day, code] for code in DAY_SHIFT_CODES)
             )
-    return se
+    return se, penalties
 
 
 # --- ソフト制約 ----------------------------------------------------------------
@@ -1123,19 +1205,20 @@ def _weekend_penalty(model, x, staff: str, days) -> List:
 
 
 def _diagnose_shortage(profiles, days, by_staff_request) -> List[str]:
-    """組めなかったときに、どの日が足りないのかを日付で示す。
+    """組めなかったときに、どの日が原因になっているかを日付で示す。
 
     「組めません」だけでは何を直せばよいか分からない。
-    希望休を入れすぎた日を見つけられるよう、日ごとの人手を数えて報告する。
-    ここでは連続勤務や夜勤の並びは見ていないので、ここに出ない日が
+    毎日の必要人数は「できるだけ守る」に変えたので、人手が足りなくても
+    組めなくなることはない。ここで見るのは、絶対に守る条件のうち
+    入れる人がいないと成り立たない日(○の看護職)だけ。
+    「希望休を減らせば組める」と誤解して無駄な作業をさせないよう、
+    人数の話は案内に入れない。
+    連続勤務や夜勤の並びは見ていないので、ここに出ない日が
     原因のこともある。あくまで当たりを付けるためのもの。
     """
     notes: List[str] = []
-    needed = sum(DAILY_REQUIREMENT.values())  # 日勤帯6 + ○2 + ◉1
 
-    short_days: List[str] = []
     no_nurse: List[int] = []
-    no_late: List[int] = []
     for day in days:
         available = []
         for profile in profiles:
@@ -1151,36 +1234,20 @@ def _diagnose_shortage(profiles, days, by_staff_request) -> List[str]:
             if entry:
                 available.append((profile, entry))
 
-        if len(available) < needed:
-            short_days.append(f"{day.day}日({len(available)}人/{needed}人)")
         if not any(p.is_nurse and NIGHT_IN in entry for p, entry in available):
             no_nurse.append(day.day)
-        if not any(
-            LATE_NIGHT_IN in entry and (not p.is_nurse or p.can_late_night_as_nurse)
-            for p, entry in available
-        ):
-            no_late.append(day.day)
 
-    if short_days:
-        notes.append(
-            f"{ALERT_MARK} 人手が足りない日: {'、'.join(short_days)}"
-            "(毎日この人数が要ります)。この日の希望休を減らすと組めるようになります"
-        )
     if no_nurse:
         notes.append(
             f"{ALERT_MARK} ○夜勤に入れる看護職がいない日: "
             f"{'、'.join(f'{d}日' for d in no_nurse)}"
         )
-    if no_late:
-        notes.append(
-            f"{ALERT_MARK} ◉深夜に入れる人がいない日: "
-            f"{'、'.join(f'{d}日' for d in no_late)}"
-        )
     if not notes:
         notes.append(
-            "日ごとの人数だけを見ると足りています。"
-            "連続勤務の上限や夜勤の並び、同席の条件が重なって組めないようです。"
-            "希望休を少し減らすか、作成をお願いしている方にご相談ください"
+            "日ごとの入れる人を見ても、原因の日は見つかりませんでした。"
+            "夜勤の顔ぶれ(看護1+介護1)や夜勤の並び、同席の条件、"
+            "週休2日と連続勤務の上限、責任者「せ」の条件が重なって"
+            "組めないようです。作成をお願いしている方にご相談ください"
         )
     return notes
 
