@@ -86,6 +86,31 @@ def test_weekday_unavailable_shifts_round_trips_with_int_keys(tmp_path):
     assert all(isinstance(key, int) for key in loaded[0].weekday_unavailable_shifts)
 
 
+def test_keep_wished_shifts_round_trips(tmp_path):
+    """keep_wished_shifts: true を保存して読み戻せること。"""
+    profile = StaffProfile(staff_id="id-keep", name="スタッフ希", keep_wished_shifts=True)
+    path = tmp_path / "profiles.yaml"
+    save_profiles([profile], path)
+
+    assert "keep_wished_shifts: true" in path.read_text(encoding="utf-8")
+    assert load_profiles(path)[0].keep_wished_shifts is True
+
+
+def test_keep_wished_shifts_is_false_when_key_is_missing(tmp_path):
+    """このキーが無い古いYAMLでも、False で読めること。"""
+    profile = StaffProfile(staff_id="id-old", name="スタッフ古")
+    path = tmp_path / "profiles.yaml"
+    save_profiles([profile], path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert any("keep_wished_shifts" in line for line in lines)
+    path.write_text(
+        "\n".join(line for line in lines if "keep_wished_shifts" not in line) + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_profiles(path)[0].keep_wished_shifts is False
+
+
 def test_item_id_round_trips_through_yaml(tmp_path):
     profiles = sample_profiles()
     original_ids = [item.item_id for item in profiles[0].review_items]

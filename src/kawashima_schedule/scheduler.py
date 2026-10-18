@@ -53,6 +53,13 @@ ALL_MARKS: Tuple[str, ...] = (
 
 # ソフト制約の重み。大きいほど優先して守る。
 WEIGHT_WISH_WORK = 40  # 希望出勤に応える
+# 希望出勤を強く守る方(keep_wished_shifts)の重み。
+# 事情があって希望をたくさん出される方のためのもので、
+# 「指定したところは優先で残す」というご要望に応える。
+# 毎日の必要人数(5000)よりは軽くして、人数を埋める方を先に立てる。
+WEIGHT_KEEP_WISHED = 500
+# 夜勤明けの翌日の夜勤(200)や最後の手段の枠(300)より重い。
+# ご本人の希望なら、夜勤明けの翌日の夜勤も作る。意図して逆転させている。
 WEIGHT_NIGHT_COUNT = 20  # 夜勤・深夜の希望回数の範囲
 WEIGHT_WORK_DAYS = 8  # 週の勤務日数の目安
 WEIGHT_WEEKEND_OFF = 5  # 土日どちらかは休みたい
@@ -664,6 +671,33 @@ def _add_fixed_days_off(model, x, profiles, days, by_staff_request) -> None:
                 if absences.get(day.day) != mark:
                     model.Add(x[profile.staff_id, day.day, mark] == 0)
 
+        # 休みたいと言われた日の前日に、深夜(◉)を入れない。
+        #
+        # 深夜は22時から翌朝6時までで日付をまたぐ。勤務表の上では翌日が「公」でも、
+        # その日の朝まで職場にいるので、休んだ日にならない。
+        # 施設の担当者から次のご指摘を受けて入れた(2026年10月):
+        #
+        #   「公休指定した日が深夜明けの公になり、字面だけ見ると休みなのですが
+        #     事実上は6時まで勤務している状態にある、つまり、休みになっていない」
+        #
+        # 希望休そのものと同じ強さで守る。せっかく出した希望休が
+        # 名ばかりになってしまうため。
+        #
+        # ただし、その前日にご本人が深夜を希望している場合は別。
+        # 深夜は ◉ → 公 と続くので、「12日は◉、13日は公」という出し方は
+        # ご本人が承知のうえでの希望になる。一律に止めると、
+        # 出していただいた希望の方を潰してしまう。
+        #
+        # 外すのは「前日に ◉ を希望している」場合だけ。前日に「日③」など
+        # ほかの希望があるときまで外すと、その希望を落として ◉ を入れる、
+        # という抜け道になり、出していただいた希望を潰してしまう。
+        wished_work = request.wish_work_days() if request else {}
+        day_numbers = [day.day for day in days]
+        for day_number in wish_off:
+            previous = day_number - 1
+            if previous in day_numbers and wished_work.get(previous) != LATE_NIGHT_IN:
+                model.Add(x[profile.staff_id, previous, LATE_NIGHT_IN] == 0)
+
 
 def _add_weekly_days_off(model, x, profiles, days, by_staff_request) -> None:
     """週休2日にする。月に何日と数えるのではなく、週ごとに休みを確保する。
@@ -1109,6 +1143,9 @@ def _soft_constraints(model, x, profiles, days, by_staff_request) -> List:
 
         # 希望出勤に応える
         if request:
+            weight = (
+                WEIGHT_KEEP_WISHED if profile.keep_wished_shifts else WEIGHT_WISH_WORK
+            )
             for day_number, mark in request.wish_work_days().items():
                 if mark not in ALL_MARKS:
                     continue
@@ -1116,7 +1153,7 @@ def _soft_constraints(model, x, profiles, days, by_staff_request) -> List:
                     continue
                 missed = model.NewBoolVar(f"missed_wish_{staff}_{day_number}")
                 model.Add(missed == 1 - x[staff, day_number, mark])
-                penalties.append(WEIGHT_WISH_WORK * missed)
+                penalties.append(weight * missed)
 
         # 夜勤・深夜の希望回数
         for count_range, mark in (

@@ -1926,3 +1926,119 @@ def test_必要人数は他のどの希望よりも優先する(monkeypatch):
     assert result.ok, result.messages
     assert result.assignments[target.staff_id][1] == "日②", "人数を埋める方を優先する"
     assert any("希望どおりにならなかった日" in m for m in result.messages)
+
+
+# --- 希望休の前日の深夜 / 希望を強く守る方 -------------------------------------------
+
+def _late_night_is_blocked(entries, day_number: int) -> bool:
+    """その日の深夜(◉)が禁止されているかを、制約だけを入れて確かめる。
+
+    勤務表を組ませて結果を見る形だと、他の人の都合や枠の取り合いに左右されて
+    「禁止されたから入らなかったのか、たまたま入らなかったのか」が分からない。
+    ここでは _add_fixed_days_off だけを入れたモデルを作り、
+    「その日を◉にする」と要求して組めなくなるかどうかを見る。
+    """
+    from kawashima_schedule.scheduler import ALL_MARKS, _add_fixed_days_off
+
+    profile = StaffProfile(staff_id="one", name="確かめる人", role="介護士")
+    days = [Day(date(2026, 9, number)) for number in (1, 2, 3)]
+    request = StaffRequests(staff_id="one", name="確かめる人", entries=entries)
+
+    model = cp_model.CpModel()
+    x = {
+        ("one", day.day, mark): model.NewBoolVar(f"one_{day.day}_{mark}")
+        for day in days
+        for mark in ALL_MARKS
+    }
+    for day in days:
+        model.AddExactlyOne(x["one", day.day, mark] for mark in ALL_MARKS)
+
+    _add_fixed_days_off(model, x, [profile], days, {"one": request})
+    model.Add(x["one", day_number, LATE_NIGHT_IN] == 1)
+
+    return cp_model.CpSolver().Solve(model) not in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    )
+
+
+def test_希望休の前日に深夜を入れない():
+    """施設の担当者のご指摘(2026年10月):
+
+      「公休指定した日が深夜明けの公になり、字面だけ見ると休みなのですが
+        事実上は6時まで勤務している状態にある、つまり、休みになっていない」
+
+    深夜は22時から翌朝6時まで。翌日が「公」でも、その日の朝まで職場にいる。
+    せっかく出していただいた希望休が名ばかりになってしまう。
+    """
+    assert _late_night_is_blocked({3: "公"}, day_number=2)
+
+
+def test_本人が深夜を希望していれば希望休の前日にも入れる():
+    """深夜は ◉ → 公 と続くので、「2日は◉、3日は公」はご本人が承知の希望。
+
+    一律に止めると、出していただいた希望の方を潰してしまう。
+    """
+    assert not _late_night_is_blocked({2: "◉", 3: "公"}, day_number=2)
+
+
+def test_前日に深夜以外の希望があっても深夜は入れない():
+    """外してよいのは「本人が前日に◉を希望している」ときだけ。
+
+    どの希望でも外してしまうと、日③の希望を捨てて◉を入れる形が通ってしまう。
+    """
+    assert _late_night_is_blocked({2: "日③", 3: "公"}, day_number=2)
+
+
+def test_希望休でない日の前日なら深夜に入れる():
+    """守れているときまで縛ると、組める形をいたずらに狭めてしまう。"""
+    assert not _late_night_is_blocked({3: "日"}, day_number=2)
+    assert not _late_night_is_blocked({}, day_number=2)
+
+
+def _two_people_wishing_the_same_slot():
+    """日②を同時に希望する2人。日②は1人しか要らないので、どちらかが外れる。"""
+    staff = _coverage_staff()
+    first = next(p for p in staff if p.available_day_shifts == ["日②"])
+    second = StaffProfile(
+        staff_id="rival",
+        name="競合さん",
+        available_day_shifts=["日②"],
+        can_night=False,
+        can_late_night=False,
+    )
+    requests = [
+        StaffRequests(staff_id=first.staff_id, name=first.name, entries={1: "日②"}),
+        StaffRequests(staff_id=second.staff_id, name=second.name, entries={1: "日②"}),
+    ]
+    return staff + [second], first, second, requests
+
+
+def test_希望を強く守る方の希望は競合しても通る(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    for keeper_is_first in (True, False):
+        staff, first, second, requests = _two_people_wishing_the_same_slot()
+        keeper = first if keeper_is_first else second
+        other = second if keeper_is_first else first
+        keeper.keep_wished_shifts = True
+
+        result = build_schedule(staff, requests=requests, year=2026, month=9)
+
+        assert result.ok, result.messages
+        assert result.assignments[keeper.staff_id][1] == "日②", "フラグのある方の希望が通る"
+        assert result.assignments[other.staff_id][1] != "日②"
+
+
+def test_希望を強く守るフラグが無ければ競合した片方だけが通る(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module, "month_days", lambda year, month: [Day(date(2026, 9, 1))]
+    )
+    staff, first, second, requests = _two_people_wishing_the_same_slot()
+
+    result = build_schedule(staff, requests=requests, year=2026, month=9)
+
+    assert result.ok, result.messages
+    got = [p for p in (first, second) if result.assignments[p.staff_id][1] == "日②"]
+    assert len(got) == 1, "同じ枠は1人だけ。どちらかは外れる"
