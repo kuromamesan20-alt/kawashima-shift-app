@@ -240,13 +240,17 @@ def _build_page() -> None:
     if not st.button("勤務表を作る", type="primary", key="build-button"):
         return
 
-    with st.spinner("組んでいます。1分ほどかかることがあります..."):
+    # 実データ(34名・31日)では2分前後かかる。「1分ほど」と出していると
+    # 止まったように見えてしまうので、実態に合わせる。
+    with st.spinner("組んでいます。2〜3分かかることがあります。そのままお待ちください..."):
         result = build_schedule(
             profiles,
             requests,
             year,
             month,
-            time_limit_seconds=120,
+            # 120秒だとぎりぎりで、月によっては最良の解まで届かない。
+            # 待ち時間より、できあがりの質を優先する。
+            time_limit_seconds=180,
             monthly_off_days=off_days,
         )
 

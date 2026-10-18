@@ -527,7 +527,7 @@ def main() -> int:
     generate.add_argument("--year", type=int, required=True)
     generate.add_argument("--month", type=int, required=True)
     generate.add_argument("--out", required=True, help="出力するExcelのパス")
-    generate.add_argument("--time-limit", type=float, default=120.0, help="計算の制限時間(秒)")
+    generate.add_argument("--time-limit", type=float, default=180.0, help="計算の制限時間(秒)")
     generate.add_argument(
         "--off-days",
         type=int,
